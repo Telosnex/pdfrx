@@ -1830,37 +1830,45 @@ function _memset(ptr, value, num) {
  */
 async function loadText(params) {
   _resetMissingFonts();
-  const { pageIndex, docHandle } = params;
+  const { pageIndex, docHandle, includeCharRects = true } = params;
   await _ensurePageAvailable(docHandle, pageIndex);
   const pageHandle = Pdfium.wasmExports.FPDF_LoadPage(docHandle, pageIndex);
-  const textPage = Pdfium.wasmExports.FPDFText_LoadPage(pageHandle);
-  if (textPage == null) return { fullText: '' };
-
-  const count = Pdfium.wasmExports.FPDFText_CountChars(textPage);
-  let fullText = '';
-
-  const rectBuffer = Pdfium.wasmExports.malloc(8 * 4); // double[4]
-  const rect = new Float64Array(Pdfium.memory.buffer, rectBuffer, 4);
-  let charRects = [];
-  for (let i = 0; i < count; i++) {
-    fullText += String.fromCodePoint(Pdfium.wasmExports.FPDFText_GetUnicode(textPage, i));
-    Pdfium.wasmExports.FPDFText_GetCharBox(
-      textPage,
-      i,
-      rectBuffer, // L
-      rectBuffer + 8 * 2, // R
-      rectBuffer + 8 * 3, // B
-      rectBuffer + 8 // T
-    );
-    charRects.push(Array.from(rect));
+  if (!pageHandle) throw new Error('Failed to load page for text extraction');
+  let textPage = 0;
+  let rectBuffer = 0;
+  try {
+    textPage = Pdfium.wasmExports.FPDFText_LoadPage(pageHandle);
+    if (!textPage) throw new Error('Failed to load text page');
+    const count = Pdfium.wasmExports.FPDFText_CountChars(textPage);
+    if (count < 0) throw new Error('Failed to count text characters');
+    let fullText = '';
+    const charRects = includeCharRects ? [] : undefined;
+    if (includeCharRects) {
+      rectBuffer = Pdfium.wasmExports.malloc(8 * 4); // double[4]
+      if (!rectBuffer) throw new Error('Failed to allocate character rectangle');
+    }
+    for (let i = 0; i < count; i++) {
+      fullText += String.fromCodePoint(Pdfium.wasmExports.FPDFText_GetUnicode(textPage, i));
+      if (includeCharRects) {
+        Pdfium.wasmExports.FPDFText_GetCharBox(
+          textPage,
+          i,
+          rectBuffer, // L
+          rectBuffer + 8 * 2, // R
+          rectBuffer + 8 * 3, // B
+          rectBuffer + 8 // T
+        );
+        // PDFium calls may grow memory and detach an earlier heap view.
+        charRects.push(Array.from(new Float64Array(Pdfium.memory.buffer, rectBuffer, 4)));
+      }
+    }
+    _updateMissingFonts(docHandle);
+    return { fullText, ...(includeCharRects ? { charRects } : {}), missingFonts: missingFonts[docHandle] };
+  } finally {
+    if (rectBuffer) Pdfium.wasmExports.free(rectBuffer);
+    if (textPage) Pdfium.wasmExports.FPDFText_ClosePage(textPage);
+    Pdfium.wasmExports.FPDF_ClosePage(pageHandle);
   }
-  Pdfium.wasmExports.free(rectBuffer);
-
-  Pdfium.wasmExports.FPDFText_ClosePage(textPage);
-  Pdfium.wasmExports.FPDF_ClosePage(pageHandle);
-
-  _updateMissingFonts(docHandle);
-  return { fullText, charRects, missingFonts: missingFonts[docHandle] };
 }
 
 /**

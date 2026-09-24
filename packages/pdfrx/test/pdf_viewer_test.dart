@@ -2204,6 +2204,9 @@ class _TestPage implements PdfPage {
   }
 
   @override
+  Future<String?> loadTextOnly() async => (await loadText())?.fullText;
+
+  @override
   Future<PdfPageRawText?> loadText() async {
     renderControl.textLoadCount++;
     await renderControl.textGate?.future;
