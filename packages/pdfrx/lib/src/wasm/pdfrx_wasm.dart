@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui_web' as ui_web;
@@ -31,6 +32,9 @@ extension type _PdfiumWasmCommunicator(JSObject _) implements JSObject {
 /// Get the global PdfiumWasmCommunicator instance
 @JS('PdfiumWasmCommunicator')
 external _PdfiumWasmCommunicator get _pdfiumWasmCommunicator;
+
+@JS('PdfiumWasmCommunicator.stop')
+external void _stopPdfiumWasmWorker();
 
 /// A handle to a registered callback that can be unregistered
 class _PdfiumWasmCallback {
@@ -120,7 +124,9 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
 
   @override
   Future<void> stopBackgroundWorker() async {
-    throw UnimplementedError('stopBackgroundWorker() is not implemented for WASM backend.');
+    // An init command can still be pending when a caller times out.
+    if (globalContext.has('PdfiumWasmCommunicator')) _stopPdfiumWasmWorker();
+    _initialized = false;
   }
 
   static String? _pdfiumWasmModulesUrlFromMetaTag() {
