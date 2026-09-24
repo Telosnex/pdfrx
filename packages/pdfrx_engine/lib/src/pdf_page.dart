@@ -94,7 +94,7 @@ abstract class PdfPage {
   ///
   /// Returns the same string as [PdfPageRawText.fullText] from [loadText], or null
   /// when text is unavailable. An empty page returns an empty string.
-  /// The web backend skips rectangle retrieval, allocation, and worker transfer.
+  /// PDFium backends skip rectangle retrieval, allocation, and worker transfer.
   /// Other backends default to [loadText] and may still generate rectangles.
   Future<String?> loadTextOnly() async => (await loadText())?.fullText;
 

@@ -1859,9 +1859,13 @@ class _PdfPagePdfium extends PdfPage with PdfPageLinkCache {
       final rectBuffer = arena<Double>(4);
       final doc = pdfium_bindings.FPDF_DOCUMENT.fromAddress(params.docHandle);
       final page = pdfium.FPDF_LoadPage(doc, params.pageNumber - 1);
-      final textPage = pdfium.FPDFText_LoadPage(page);
+      if (page == nullptr) throw PdfException('FPDF_LoadPage(${params.pageNumber}) failed.');
+      pdfium_bindings.FPDF_TEXTPAGE textPage = nullptr;
       try {
+        textPage = pdfium.FPDFText_LoadPage(page);
+        if (textPage == nullptr) throw PdfException('FPDFText_LoadPage(${params.pageNumber}) failed.');
         final charCount = pdfium.FPDFText_CountChars(textPage);
+        if (charCount < 0) throw PdfException('FPDFText_CountChars(${params.pageNumber}) failed.');
         final sb = StringBuffer();
         final charRects = <PdfRect>[];
         for (var i = 0; i < charCount; i++) {
@@ -1882,6 +1886,31 @@ class _PdfPagePdfium extends PdfPage with PdfPageLinkCache {
         pdfium.FPDF_ClosePage(page);
       }
     }, (docHandle: document.document.address, pageNumber: pageNumber, bbLeft: bbLeft, bbBottom: bbBottom));
+  }
+
+  @override
+  Future<String?> loadTextOnly() async {
+    if (document.isDisposed || !isLoaded) return null;
+    return await BackgroundWorker.compute((params) {
+      final doc = pdfium_bindings.FPDF_DOCUMENT.fromAddress(params.docHandle);
+      final page = pdfium.FPDF_LoadPage(doc, params.pageNumber - 1);
+      if (page == nullptr) throw PdfException('FPDF_LoadPage(${params.pageNumber}) failed.');
+      pdfium_bindings.FPDF_TEXTPAGE textPage = nullptr;
+      try {
+        textPage = pdfium.FPDFText_LoadPage(page);
+        if (textPage == nullptr) throw PdfException('FPDFText_LoadPage(${params.pageNumber}) failed.');
+        final charCount = pdfium.FPDFText_CountChars(textPage);
+        if (charCount < 0) throw PdfException('FPDFText_CountChars(${params.pageNumber}) failed.');
+        final text = StringBuffer();
+        for (var i = 0; i < charCount; i++) {
+          text.writeCharCode(pdfium.FPDFText_GetUnicode(textPage, i));
+        }
+        return text.toString();
+      } finally {
+        if (textPage != nullptr) pdfium.FPDFText_ClosePage(textPage);
+        pdfium.FPDF_ClosePage(page);
+      }
+    }, (docHandle: document.document.address, pageNumber: pageNumber));
   }
 
   @override
