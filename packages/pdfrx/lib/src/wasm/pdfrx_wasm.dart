@@ -71,6 +71,8 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
   static const defaultWasmModulePath = 'assets/packages/pdfrx/assets/';
 
   bool _initialized = false;
+  int _clientGeneration = 0;
+  String? _workerUrl;
 
   @override
   Future<void> init() async {
@@ -85,7 +87,9 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
         ..charset = 'utf-8'
         ..async = true
         ..type = 'module'
-        ..src = _resolveUrl('pdfium_client.js', baseUrl: moduleUrl);
+        // Module scripts with the same URL execute only once in a document.
+        // A restarted worker needs a fresh client instance.
+        ..src = '${_resolveUrl('pdfium_client.js', baseUrl: moduleUrl)}?worker=${_clientGeneration++}';
       web.document.querySelector('head')!.appendChild(script);
       final completer = Completer();
       final sub1 = script.onLoad.listen((_) => completer.complete());
@@ -126,6 +130,8 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
   Future<void> stopBackgroundWorker() async {
     // An init command can still be pending when a caller times out.
     if (globalContext.has('PdfiumWasmCommunicator')) _stopPdfiumWasmWorker();
+    if (_workerUrl != null) web.URL.revokeObjectURL(_workerUrl!);
+    _workerUrl = null;
     _initialized = false;
   }
 
@@ -144,7 +150,8 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
       [content].jsify() as JSArray<web.BlobPart>,
       web.BlobPropertyBag(type: 'application/javascript'),
     );
-    return web.URL.createObjectURL(blob);
+    _workerUrl = web.URL.createObjectURL(blob);
+    return _workerUrl!;
   }
 
   /// Resolves the given [relativeUrl] against a base URL to produce an absolute URL.
