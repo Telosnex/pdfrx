@@ -4,6 +4,18 @@ globalThis.PdfiumWasmCommunicator = (function () {
   let callbackId = 0;
   const requestCallbacks = new Map();
   const registeredCallbacks = new Map();
+  let stopped = false;
+
+  function stop(reason) {
+    if (stopped) return;
+    stopped = true;
+    worker.terminate();
+    for (const callback of requestCallbacks.values()) {
+      callback.reject(new Error(reason));
+    }
+    requestCallbacks.clear();
+    registeredCallbacks.clear();
+  }
 
   worker.onmessage = (event) => {
     const data = event.data;
@@ -41,14 +53,26 @@ globalThis.PdfiumWasmCommunicator = (function () {
 
   worker.onerror = (err) => {
     console.error('Worker error:', err);
+    stop('PDFium WASM worker failed');
   };
+
+  worker.onmessageerror = () => stop('PDFium WASM worker response failed');
 
   return {
     sendCommand: function (command, parameters = {}, transfer = []) {
       return new Promise((resolve, reject) => {
+        if (stopped) {
+          reject(new Error('PDFium WASM worker stopped'));
+          return;
+        }
         const id = ++requestId;
         requestCallbacks.set(id, { resolve, reject });
-        worker.postMessage({ id, command, parameters }, transfer);
+        try {
+          worker.postMessage({ id, command, parameters }, transfer);
+        } catch (error) {
+          requestCallbacks.delete(id);
+          reject(error);
+        }
       });
     },
 
@@ -60,6 +84,10 @@ globalThis.PdfiumWasmCommunicator = (function () {
 
     unregisterCallback: function (id) {
       registeredCallbacks.delete(id);
-    }
+    },
+
+    stop: function () {
+      stop('PDFium WASM worker stopped');
+    },
   };
 })();
