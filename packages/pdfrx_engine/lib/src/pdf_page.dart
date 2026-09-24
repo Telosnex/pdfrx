@@ -90,6 +90,14 @@ abstract class PdfPage {
   /// If the page is not loaded yet (progressive loading case only), this function returns null.
   Future<PdfPageRawText?> loadText();
 
+  /// Load only the page's text, without returning character bounding boxes.
+  ///
+  /// Returns the same string as [PdfPageRawText.fullText] from [loadText], or null
+  /// when text is unavailable. An empty page returns an empty string.
+  /// The web backend skips rectangle retrieval, allocation, and worker transfer.
+  /// Other backends default to [loadText] and may still generate rectangles.
+  Future<String?> loadTextOnly() async => (await loadText())?.fullText;
+
   /// Load links.
   ///
   /// Results may be cached for this page instance. Reload the page after modifying its annotations.

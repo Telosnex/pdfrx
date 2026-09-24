@@ -840,6 +840,17 @@ class _PdfPageWasm extends PdfPage with PdfPageLinkCache {
   }
 
   @override
+  Future<String?> loadTextOnly() async {
+    if (document.isDisposed || !isLoaded) return null;
+    final result = await _sendCommand(
+      'loadText',
+      parameters: {'docHandle': document.document['docHandle'], 'pageIndex': pageNumber - 1, 'includeCharRects': false},
+    );
+    document.updateMissingFonts(result['missingFonts']);
+    return result['fullText'] as String;
+  }
+
+  @override
   final int pageNumber;
 
   @override
