@@ -73,48 +73,64 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
   bool _initialized = false;
   int _clientGeneration = 0;
   String? _workerUrl;
+  Completer<void>? _cancelInitialization;
+  web.HTMLScriptElement? _loadingScript;
 
   @override
   Future<void> init() async {
     if (_initialized) return;
     await synchronized(() async {
       if (_initialized) return;
-      Pdfrx.pdfiumWasmModulesUrl ??= _pdfiumWasmModulesUrlFromMetaTag();
-      pdfiumWasmWorkerUrl = _getWorkerUrl();
-      final moduleUrl = _resolveUrl(Pdfrx.pdfiumWasmModulesUrl ?? defaultWasmModulePath);
-      final script = web.document.createElement('script') as web.HTMLScriptElement
-        ..type = 'text/javascript'
-        ..charset = 'utf-8'
-        ..async = true
-        ..type = 'module'
-        // Module scripts with the same URL execute only once in a document.
-        // A restarted worker needs a fresh client instance.
-        ..src = _withCacheKey(
-          _resolveUrl('pdfium_client.js', baseUrl: moduleUrl),
-          workerGeneration: _clientGeneration++,
-        );
-      web.document.querySelector('head')!.appendChild(script);
-      final completer = Completer();
-      final sub1 = script.onLoad.listen((_) => completer.complete());
-      final sub2 = script.onError.listen((event) => completer.completeError(event));
+      final cancelled = Completer<void>();
+      _cancelInitialization = cancelled;
       try {
-        await completer.future;
-      } catch (e) {
-        throw StateError('Failed to load pdfium_client.js from $moduleUrl: $e');
-      } finally {
-        await sub1.cancel();
-        await sub2.cancel();
-      }
+        Pdfrx.pdfiumWasmModulesUrl ??= _pdfiumWasmModulesUrlFromMetaTag();
+        pdfiumWasmWorkerUrl = _getWorkerUrl();
+        final moduleUrl = _resolveUrl(Pdfrx.pdfiumWasmModulesUrl ?? defaultWasmModulePath);
+        final script = web.document.createElement('script') as web.HTMLScriptElement
+          ..type = 'text/javascript'
+          ..charset = 'utf-8'
+          ..async = true
+          ..type = 'module'
+          // Module scripts with the same URL execute only once in a document.
+          // A restarted worker needs a fresh client instance.
+          ..src = _withCacheKey(
+            _resolveUrl('pdfium_client.js', baseUrl: moduleUrl),
+            workerGeneration: _clientGeneration++,
+          );
+        web.document.querySelector('head')!.appendChild(script);
+        _loadingScript = script;
+        final completer = Completer();
+        final sub1 = script.onLoad.listen((_) {
+          if (!completer.isCompleted) completer.complete();
+        });
+        final sub2 = script.onError.listen((event) {
+          if (!completer.isCompleted) completer.completeError(event);
+        });
+        try {
+          await Future.any([completer.future, cancelled.future]);
+        } catch (e) {
+          throw StateError('Failed to load pdfium_client.js from $moduleUrl: $e');
+        } finally {
+          await sub1.cancel();
+          await sub2.cancel();
+          _loadingScript = null;
+        }
 
-      // Send init command to worker with authentication options
-      await _sendCommand(
-        'init',
-        parameters: {
-          if (Pdfrx.pdfiumWasmHeaders != null) 'headers': Pdfrx.pdfiumWasmHeaders,
-          'withCredentials': Pdfrx.pdfiumWasmWithCredentials,
-        },
-      );
-      _initialized = true;
+        if (cancelled.isCompleted) throw StateError('PDFium initialization stopped');
+        // Send init command to worker with authentication options
+        await _sendCommand(
+          'init',
+          parameters: {
+            if (Pdfrx.pdfiumWasmHeaders != null) 'headers': Pdfrx.pdfiumWasmHeaders,
+            'withCredentials': Pdfrx.pdfiumWasmWithCredentials,
+          },
+        );
+        if (cancelled.isCompleted) throw StateError('PDFium initialization stopped');
+        _initialized = true;
+      } finally {
+        if (identical(_cancelInitialization, cancelled)) _cancelInitialization = null;
+      }
     });
   }
 
@@ -132,6 +148,10 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
   @override
   Future<void> stopBackgroundWorker() async {
     // An init command can still be pending when a caller times out.
+    final cancelled = _cancelInitialization;
+    if (cancelled != null && !cancelled.isCompleted) cancelled.complete();
+    _loadingScript?.remove();
+    _loadingScript = null;
     if (globalContext.has('PdfiumWasmCommunicator')) _stopPdfiumWasmWorker();
     if (_workerUrl != null) web.URL.revokeObjectURL(_workerUrl!);
     _workerUrl = null;
