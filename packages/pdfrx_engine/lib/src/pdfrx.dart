@@ -47,6 +47,13 @@ class Pdfrx {
   /// To override the default pdfium WASM modules directory URL. It must be terminated by '/'.
   static String? pdfiumWasmModulesUrl;
 
+  /// Cache key for PDFium web assets. Set before initializing pdfrx.
+  ///
+  /// The same `v` query parameter is added to the client script, worker
+  /// script, and WASM binary. Change the key when deploying a different
+  /// asset set, so browsers can cache all three between releases.
+  static String? pdfiumWasmCacheKey;
+
   /// HTTP headers to use when fetching the PDFium WASM module.
   /// This is useful for authentication on protected servers.
   /// Only supported on Flutter Web.

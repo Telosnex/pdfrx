@@ -89,7 +89,10 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
         ..type = 'module'
         // Module scripts with the same URL execute only once in a document.
         // A restarted worker needs a fresh client instance.
-        ..src = '${_resolveUrl('pdfium_client.js', baseUrl: moduleUrl)}?worker=${_clientGeneration++}';
+        ..src = _withCacheKey(
+          _resolveUrl('pdfium_client.js', baseUrl: moduleUrl),
+          workerGeneration: _clientGeneration++,
+        );
       web.document.querySelector('head')!.appendChild(script);
       final completer = Completer();
       final sub1 = script.onLoad.listen((_) => completer.complete());
@@ -143,8 +146,8 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
   /// Workaround for Cross-Origin-Embedder-Policy restriction on WASM enabled environments
   String _getWorkerUrl() {
     final moduleUrl = _resolveUrl(Pdfrx.pdfiumWasmModulesUrl ?? defaultWasmModulePath);
-    final workerJsUrl = _resolveUrl('pdfium_worker.js', baseUrl: moduleUrl);
-    final pdfiumWasmUrl = _resolveUrl('pdfium.wasm', baseUrl: moduleUrl);
+    final workerJsUrl = _withCacheKey(_resolveUrl('pdfium_worker.js', baseUrl: moduleUrl));
+    final pdfiumWasmUrl = _withCacheKey(_resolveUrl('pdfium.wasm', baseUrl: moduleUrl));
     final content = 'const pdfiumWasmUrl="$pdfiumWasmUrl";importScripts("$workerJsUrl");';
     final blob = web.Blob(
       [content].jsify() as JSArray<web.BlobPart>,
@@ -152,6 +155,21 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
     );
     _workerUrl = web.URL.createObjectURL(blob);
     return _workerUrl!;
+  }
+
+  static String _withCacheKey(String url, {int? workerGeneration}) {
+    final key = Pdfrx.pdfiumWasmCacheKey;
+    if ((key == null || key.isEmpty) && workerGeneration == null) return url;
+    final uri = Uri.parse(url);
+    return uri
+        .replace(
+          queryParameters: {
+            ...uri.queryParameters,
+            if (key != null && key.isNotEmpty) 'v': key,
+            if (workerGeneration != null) 'worker': '$workerGeneration',
+          },
+        )
+        .toString();
   }
 
   /// Resolves the given [relativeUrl] against a base URL to produce an absolute URL.
