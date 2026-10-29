@@ -44,6 +44,15 @@ jobs:
       - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
       - run: flutter pub get
         working-directory: packages/pdfrx/example/viewer
+      # Diagnostics: where the PDFium native asset lands in the Linux bundle.
+      - name: Diagnose the Linux bundle
+        if: runner.os == 'Linux'
+        working-directory: packages/pdfrx/example/viewer
+        run: |
+          flutter build linux --debug || true
+          find build -iname '*pdfium*' | head -20
+          ls -la build/native_assets/linux 2>&1 | head
+          ls -la build/linux/x64/debug/bundle/lib 2>&1 | head -20
       - name: Example integration tests
         working-directory: packages/pdfrx/example/viewer
         run: |
