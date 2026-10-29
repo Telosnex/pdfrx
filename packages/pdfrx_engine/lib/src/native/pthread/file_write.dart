@@ -60,9 +60,8 @@ int _write(Pointer<Void> pThis, Pointer<Void> pData, int size) {
   final cs = fwAddress + _mutexOffsetWrite;
   final cv = fwAddress + _condOffsetWrite;
   final writeFuncPtr = Pointer<IntPtr>.fromAddress(fwAddress + _writeFuncOffset);
-  final writeFunc = Pointer<NativeFunction<Void Function(Pointer<Void>, IntPtr)>>.fromAddress(
-    writeFuncPtr.value,
-  ).asFunction<void Function(Pointer<Void>, int)>();
+  final writeFunc = Pointer<NativeFunction<Void Function(Pointer<Void>, IntPtr)>>.fromAddress(writeFuncPtr.value)
+      .asFunction<void Function(Pointer<Void>, int)>();
 
   pthread_mutex_lock(cs);
   // Call Dart side write function. The call is returned immediately (it runs asynchronously)

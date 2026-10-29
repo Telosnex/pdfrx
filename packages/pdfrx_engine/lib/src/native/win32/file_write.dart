@@ -59,9 +59,8 @@ int _write(Pointer<Void> pThis, Pointer<Void> pData, int size) {
   final cs = fwAddress + _csOffsetWrite;
   final cv = fwAddress + _cvOffsetWrite;
   final writeFuncPtr = Pointer<IntPtr>.fromAddress(fwAddress + _writeFuncOffset);
-  final writeFunc = Pointer<NativeFunction<Void Function(Pointer<Void>, IntPtr)>>.fromAddress(
-    writeFuncPtr.value,
-  ).asFunction<void Function(Pointer<Void>, int)>();
+  final writeFunc = Pointer<NativeFunction<Void Function(Pointer<Void>, IntPtr)>>.fromAddress(writeFuncPtr.value)
+      .asFunction<void Function(Pointer<Void>, int)>();
 
   EnterCriticalSection(cs);
 

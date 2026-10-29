@@ -15,11 +15,7 @@ import '../pdfrx_entry_functions.dart';
 /// - Calls [PdfrxEntryFunctions.init] to initialize the library.
 ///
 /// For Flutter, you should call `pdfrxFlutterInitialize` instead of the function.
-Future<void> pdfrxInitialize({
-  String? tmpPath,
-  String? pdfiumRelease,
-  bool processWidePdfiumGate = false,
-}) async {
+Future<void> pdfrxInitialize({String? tmpPath, String? pdfiumRelease, bool processWidePdfiumGate = false}) async {
   Pdfrx.useProcessWidePdfiumGate = processWidePdfiumGate;
   throw UnimplementedError(
     'Wow, this is not supposed to be called.\n'

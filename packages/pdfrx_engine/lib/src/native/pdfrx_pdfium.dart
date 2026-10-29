@@ -1956,26 +1956,23 @@ class _PdfPagePdfium extends PdfPage with PdfPageLinkCache {
     if (document.isDisposed || !isLoaded) return null;
     // Hebrew normalization reorders characters with their rectangles.
     if (Pdfrx.normalizeHebrewText) return (await loadText())?.fullText;
-    return await document._computeWithArena(
-      (arena, params) {
-        final doc = pdfium_bindings.FPDF_DOCUMENT.fromAddress(params.docHandle);
-        // As loadText: an unloadable page has no text (upstream #740).
-        final page = pdfium.FPDF_LoadPage(doc, params.pageNumber - 1);
-        final textPage = pdfium.FPDFText_LoadPage(page);
-        try {
-          final charCount = pdfium.FPDFText_CountChars(textPage);
-          final text = StringBuffer();
-          for (var i = 0; i < charCount; i++) {
-            text.writeCharCode(pdfium.FPDFText_GetUnicode(textPage, i));
-          }
-          return text.toString();
-        } finally {
-          pdfium.FPDFText_ClosePage(textPage);
-          pdfium.FPDF_ClosePage(page);
+    return await document._computeWithArena((arena, params) {
+      final doc = pdfium_bindings.FPDF_DOCUMENT.fromAddress(params.docHandle);
+      // As loadText: an unloadable page has no text (upstream #740).
+      final page = pdfium.FPDF_LoadPage(doc, params.pageNumber - 1);
+      final textPage = pdfium.FPDFText_LoadPage(page);
+      try {
+        final charCount = pdfium.FPDFText_CountChars(textPage);
+        final text = StringBuffer();
+        for (var i = 0; i < charCount; i++) {
+          text.writeCharCode(pdfium.FPDFText_GetUnicode(textPage, i));
         }
-      },
-      (docHandle: document.document.address, pageNumber: pageNumber),
-    );
+        return text.toString();
+      } finally {
+        pdfium.FPDFText_ClosePage(textPage);
+        pdfium.FPDF_ClosePage(page);
+      }
+    }, (docHandle: document.document.address, pageNumber: pageNumber));
   }
 
   @override

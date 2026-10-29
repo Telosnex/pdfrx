@@ -1,0 +1,69 @@
+name: Unit
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    # ci/** branches run it too: a new workflow cannot be started by hand
+    # before it is on master.
+    branches: [master, 'ci/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unit-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  unit:
+    name: Unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/lint@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      # The workspace: one pub get at the root resolves every package.
+      - run: flutter pub get
+      # After pub get: dart format reads each package's language version.
+      # Generated files (first line "// GENERATED ...") keep their generator's
+      # layout.
+      - run: |
+          git ls-files '*.dart' |
+            while read -r f; do head -1 "$f" | grep -qiE '^// *generated' || echo "$f"; done |
+            xargs dart format --output=none --set-exit-if-changed
+      - name: Analyze
+        run: |
+          for d in packages/pdfium_dart packages/pdfium_flutter packages/pdfrx_engine \
+            packages/pdfrx packages/pdfrx_coregraphics \
+            packages/pdfrx/example/viewer packages/pdfrx/example/pdf_combine; do
+            (cd "$d" && flutter analyze --fatal-infos)
+          done
+      - name: pdfium_dart tests
+        working-directory: packages/pdfium_dart
+        run: dart test -r expanded
+      - name: pdfrx_engine tests
+        working-directory: packages/pdfrx_engine
+        run: |
+          dart test -r expanded
+          dart test -r expanded test/process_gate_smoke.dart
+      - name: pdfrx tests
+        working-directory: packages/pdfrx
+        run: flutter test -r expanded
+      # The browser test runs in Chrome; the other files use dart:io and are
+      # VM-only (flutter test on the VM skips the browser file).
+      - name: pdfrx tests in Chrome
+        working-directory: packages/pdfrx
+        run: flutter test --platform chrome -r expanded test/pdf_text_only_web_test.dart
+      # The PDFium worker's JavaScript (the web build) runs in node.
+      - name: pdfrx worker scripts
+        working-directory: packages/pdfrx
+        run: node --test test/*.cjs

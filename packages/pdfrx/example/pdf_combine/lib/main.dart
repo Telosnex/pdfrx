@@ -399,9 +399,8 @@ class _PdfCombinePageState extends State<PdfCombinePage> {
                       const SizedBox(height: 16),
                       Text(
                         'Or Drop PDF files here',
-                        style: Theme.of(
-                          context,
-                        ).textTheme.headlineSmall?.copyWith(color: Theme.of(context).colorScheme.primary),
+                        style: Theme.of(context).textTheme.headlineSmall
+                            ?.copyWith(color: Theme.of(context).colorScheme.primary),
                       ),
                     ],
                   ),
@@ -460,9 +459,8 @@ class _PdfCombinePageState extends State<PdfCombinePage> {
                                       const SizedBox(height: 16),
                                       Text(
                                         'Add PDF files...',
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.primary),
+                                        style: Theme.of(context).textTheme.bodyMedium
+                                            ?.copyWith(color: Theme.of(context).colorScheme.primary),
                                       ),
                                     ],
                                   ),
@@ -517,9 +515,8 @@ class _PdfCombinePageState extends State<PdfCombinePage> {
                         const SizedBox(height: 16),
                         Text(
                           'Drop PDF files here',
-                          style: Theme.of(
-                            context,
-                          ).textTheme.headlineSmall?.copyWith(color: Theme.of(context).colorScheme.primary),
+                          style: Theme.of(context).textTheme.headlineSmall
+                              ?.copyWith(color: Theme.of(context).colorScheme.primary),
                         ),
                       ],
                     ),

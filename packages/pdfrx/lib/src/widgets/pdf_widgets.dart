@@ -166,8 +166,11 @@ class PdfDocumentViewBuilder extends StatefulWidget {
 /// [context] is the build context.
 /// [error] is the error that occurred.
 /// [stackTrace] is the stack trace of the error, which may be null.
-typedef PdfDocumentViewBuilderErrorBuilder =
-    Widget Function(BuildContext context, Object error, StackTrace? stackTrace);
+typedef PdfDocumentViewBuilderErrorBuilder = Widget Function(
+  BuildContext context,
+  Object error,
+  StackTrace? stackTrace,
+);
 
 class _PdfDocumentViewBuilderState extends State<PdfDocumentViewBuilder> {
   StreamSubscription<PdfDocumentEvent>? _updateSubscription;
@@ -257,8 +260,12 @@ typedef PdfPageViewSizeCallback = Size Function(Size biggestSize, PdfPage page, 
 /// [pageImage] is the page image; it is null if the page is not rendered yet.
 /// The image size may be different from [pageSize] because of the screen DPI
 /// or some other reasons.
-typedef PdfPageViewDecorationBuilder =
-    Widget Function(BuildContext context, Size pageSize, PdfPage page, RawImage? pageImage);
+typedef PdfPageViewDecorationBuilder = Widget Function(
+  BuildContext context,
+  Size pageSize,
+  PdfPage page,
+  RawImage? pageImage,
+);
 
 /// A widget that displays a page of a PDF document.
 class PdfPageView extends StatefulWidget {

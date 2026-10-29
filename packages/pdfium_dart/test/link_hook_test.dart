@@ -34,19 +34,22 @@ void main() {
       expect(_assetIds(output), isNot(contains(_pdfiumAssetId)));
     });
 
-    test('keeps the process-wide PDFium gate asset for iOS Flutter apps', () async {
-      final input = _linkInput(
-        targetOS: OS.iOS,
-        pdfiumProvidedByFlutter: true,
-        extraAssets: [_gateAsset()],
-      );
-      final output = LinkOutputBuilder();
+    test(
+      'keeps the process-wide PDFium gate asset for iOS Flutter apps',
+      () async {
+        final input = _linkInput(
+          targetOS: OS.iOS,
+          pdfiumProvidedByFlutter: true,
+          extraAssets: [_gateAsset()],
+        );
+        final output = LinkOutputBuilder();
 
-      await link_hook.linkPdfiumAssets(input, output);
+        await link_hook.linkPdfiumAssets(input, output);
 
-      expect(_assetIds(output), contains(_gateAssetId));
-      expect(_assetIds(output), isNot(contains(_pdfiumAssetId)));
-    });
+        expect(_assetIds(output), contains(_gateAssetId));
+        expect(_assetIds(output), isNot(contains(_pdfiumAssetId)));
+      },
+    );
   });
 }
 

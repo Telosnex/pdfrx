@@ -100,8 +100,9 @@ final class PdfTextFormatter {
                 break;
               }
             }
-            final extentRatio =
-                isGeneratedGap ? _generatedSpaceExtentToLineHeightRatio : _maxSpaceExtentToLineHeightRatio;
+            final extentRatio = isGeneratedGap
+                ? _generatedSpaceExtentToLineHeightRatio
+                : _maxSpaceExtentToLineHeightRatio;
             switch (dir) {
               case PdfTextDirection.ltr:
               case PdfTextDirection.unknown:
@@ -115,7 +116,9 @@ final class PdfTextFormatter {
               case PdfTextDirection.vrtl:
                 final maxExtent = bounds.width * extentRatio;
                 final bottom = a.bottom > b.top ? b.top : a.bottom;
-                outputCharRects.add(PdfRect(bounds.left, a.bottom, bounds.right, math.max(bottom, a.bottom - maxExtent)));
+                outputCharRects.add(
+                  PdfRect(bounds.left, a.bottom, bounds.right, math.max(bottom, a.bottom - maxExtent)),
+                );
             }
             outputText.write(' ');
           }

@@ -2,10 +2,16 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:pdfrx/pdfrx.dart';
+import 'package:telosnex_web_test/telosnex_web_test.dart';
 
 void main() {
-  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  installWebTestSupport(binding);
+  pdfiumLoadingTests();
+}
 
+/// Also called by all.dart, the entry point of the web and iOS runs.
+void pdfiumLoadingTests() {
   testWidgets('loads PDFium and renders an asset PDF on Android', (tester) async {
     await tester.pumpWidget(const SizedBox.shrink());
 
