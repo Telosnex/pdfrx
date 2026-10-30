@@ -41,7 +41,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev xvfb > /dev/null
-      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@0554f3662445d678e2effbd838d15968d673f7af # v0.5.6
       - run: flutter pub get
         working-directory: packages/pdfrx/example/viewer
       # On Linux, flutter test -d linux runs the app from a bundle that lacks
@@ -97,10 +97,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@0554f3662445d678e2effbd838d15968d673f7af # v0.5.6
       - run: flutter pub get
         working-directory: packages/pdfrx/example/viewer
-      - uses: Telosnex/telosnex_ci_tools/actions/web-driver@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/web-driver@0554f3662445d678e2effbd838d15968d673f7af # v0.5.6
         with:
           browser: chrome
           working-directory: packages/pdfrx/example/viewer
@@ -126,15 +126,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@0554f3662445d678e2effbd838d15968d673f7af # v0.5.6
       - run: flutter pub get
         working-directory: packages/pdfrx/example/viewer
-      - uses: Telosnex/telosnex_ci_tools/actions/ios-simulator-boot@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/ios-simulator-boot@0554f3662445d678e2effbd838d15968d673f7af # v0.5.6
         id: simulator
       # One target, so one Xcode build, install and launch. No build ahead
       # (flutter build ios --simulator): Xcode rebuilds for flutter test's
       # destination anyway.
-      - uses: Telosnex/telosnex_ci_tools/actions/ios-flutter-test@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/ios-flutter-test@0554f3662445d678e2effbd838d15968d673f7af # v0.5.6
         with:
           working-directory: packages/pdfrx/example/viewer
           target: integration_test/all.dart
@@ -151,10 +151,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/setup-flutter@0554f3662445d678e2effbd838d15968d673f7af # v0.5.6
       - run: flutter pub get
         working-directory: packages/pdfrx/example/viewer
-      - uses: Telosnex/telosnex_ci_tools/actions/android-emulator@cba77fc0d4330f1bef81193c53cd7dd976f0ebcf # v0.5.3
+      - uses: Telosnex/telosnex_ci_tools/actions/android-emulator@0554f3662445d678e2effbd838d15968d673f7af # v0.5.6
         id: emulator
         with:
           api-level: '36'
