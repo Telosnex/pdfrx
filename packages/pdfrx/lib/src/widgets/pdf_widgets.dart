@@ -448,15 +448,14 @@ class _PdfPageViewState extends State<PdfPageView> {
 
     _cancellationToken?.cancel();
     _cancellationToken = page.createCancellationToken();
-    final pageImage = await page.render(
-      fullWidth: pageSize.width,
-      fullHeight: pageSize.height,
-      rotationOverride: widget.rotationOverride,
-      cancellationToken: _cancellationToken,
-    );
-    if (pageImage == null) return;
     try {
-      final newImage = await pageImage.createImage();
+      final newImage = await page.renderForDisplay(
+        fullWidth: pageSize.width,
+        fullHeight: pageSize.height,
+        rotationOverride: widget.rotationOverride,
+        cancellationToken: _cancellationToken,
+      );
+      if (newImage == null) return;
       if (!mounted) {
         newImage.dispose();
         return;
@@ -470,8 +469,6 @@ class _PdfPageViewState extends State<PdfPageView> {
       // already claimed `_pageSize`. Otherwise the equality guard above locks
       // this page out of ever retrying and it stays blank for good.
       if (_pageSize == pageSize) _pageSize = previousPageSize;
-    } finally {
-      pageImage.dispose();
     }
   }
 }
