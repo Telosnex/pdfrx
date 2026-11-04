@@ -1,0 +1,8 @@
+# Upstream sources, checked daily by the Upstream watch workflow
+# (telosnex_ci_tools, lib/src/upstream.dart). Set `seen` to skip an update.
+sources:
+  - name: PDFium (pdfium-binaries)
+    tags: https://github.com/bblanchon/pdfium-binaries.git
+    version: 'chromium/(\d+)'
+    pin: {file: packages/pdfium_dart/hook/build.dart, pattern: "_pdfiumRelease = 'chromium%2F(\\d+)'"}
+    alert: major
