@@ -12,6 +12,7 @@ resolution: workspace
 dependencies:
   archive:
   code_assets:
+  crypto:
   ffi:
   hooks:
   http:
@@ -30,30 +31,30 @@ ffigen:
   description: "Bindings for PDFium C API"
   headers:
     entry-points:
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_signature.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_sysfontinfo.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_javascript.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_text.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_searchex.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_progressive.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdfview.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_edit.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_attachment.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_annot.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_catalog.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_ppo.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_formfill.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_save.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_doc.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_structtree.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_dataavail.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_fwlevent.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_ext.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_transformpage.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_flatten.h"
-      - ".dart_tool/pdfium_headers/chromium_7811/include/fpdf_thumbnail.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_signature.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_sysfontinfo.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_javascript.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_text.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_searchex.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_progressive.h"
+      - ".dart_tool/pdfium_headers/include/fpdfview.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_edit.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_attachment.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_annot.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_catalog.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_ppo.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_formfill.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_save.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_doc.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_structtree.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_dataavail.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_fwlevent.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_ext.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_transformpage.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_flatten.h"
+      - ".dart_tool/pdfium_headers/include/fpdf_thumbnail.h"
     include-directives:
-      - ".dart_tool/pdfium_headers/chromium_7811/include/**"
+      - ".dart_tool/pdfium_headers/include/**"
   preamble: |
     // ignore_for_file: unused_field
     // dart format off

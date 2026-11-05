@@ -1,7 +1,8 @@
-# PDFium xcframework configuration
-# https://github.com/espresso3389/pdfium-xcframework/releases
-PDFIUM_URL = "https://github.com/espresso3389/pdfium-xcframework/releases/download/v158.0.8125.0-20261029-150241/PDFium-chromium-8125-20261029-150241.xcframework.zip"
-PDFIUM_HASH = "4e83df9e096b98963070a91e1c8fe7252d5c3a80d505e8acfda3f18ac904230d"
+# PDFium.xcframework, built by packages/pdfium_flutter/tool/build_xcframework.sh.
+# Keep in step with packages/pdfium_dart/pdfium.json and Package.swift
+# (packages/pdfium_dart/test/pdfium_pins_test.dart checks).
+PDFIUM_URL = "https://github.com/Telosnex/pdfrx/releases/download/pdfium-xcframework-chromium-8138/PDFium-chromium-8138-20261105-001403.xcframework.zip"
+PDFIUM_HASH = "b0c1c67b00ece10b7aae09098b5d19b9638def824961910806a4efb0dfd814a8"
 
 require 'yaml'
 

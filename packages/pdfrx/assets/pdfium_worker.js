@@ -645,6 +645,11 @@ const emEnv = {
   emscripten_errn: function () {
     _notImplemented('emscripten_errn');
   },
+  // PDFium 8138 and later: prints a NUL-terminated UTF-8 string, as
+  // Emscripten's err() does.
+  emscripten_err: function (str) {
+    console.error(StringUtils.utf8BytesToString(new Uint8Array(Pdfium.memory.buffer, str)));
+  },
   emscripten_resize_heap: function (requestedSizeInBytes) {
     const maxHeapSizeInBytes = 2 * 1024 * 1024 * 1024; // 2GB
     if (requestedSizeInBytes > maxHeapSizeInBytes) {

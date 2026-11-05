@@ -90,7 +90,13 @@ test('#776: bundled WASM saves a new PDF with the current local creation date', 
   );
   const date = new Date(now);
   const parts = [date.getMonth() + 1, date.getDate(), date.getHours(), date.getMinutes(), date.getSeconds()];
-  const expected = `D:${date.getFullYear()}${parts.map((part) => String(part).padStart(2, '0')).join('')}`;
+  // PDFium 8138 and later append the UTC offset (pdfium 64f69426a1), which it
+  // computes from the worker's _localtime_js and _gmtime_js.
+  const offset = -date.getTimezoneOffset();
+  const pad = (n) => String(n).padStart(2, '0');
+  const expected =
+    `D:${date.getFullYear()}${parts.map(pad).join('')}` +
+    `${offset < 0 ? '-' : '+'}${pad(Math.floor(Math.abs(offset) / 60))}'${pad(Math.abs(offset) % 60)}'`;
   const actual = /\/CreationDate\s*\(([^)]*)\)/.exec(Buffer.from(data).toString('latin1'))?.[1];
   assert.equal(actual, expected);
 });

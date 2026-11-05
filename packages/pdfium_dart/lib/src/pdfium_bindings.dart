@@ -3589,6 +3589,30 @@ late final _FPDFPageObj_AddMarkPtr = _lookup<
 late final _FPDFPageObj_AddMark = _FPDFPageObj_AddMarkPtr.asFunction<FPDF_PAGEOBJECTMARK Function(FPDF_PAGEOBJECT , FPDF_BYTESTRING )>();
 
 /// Experimental API.
+/// Add an existing content mark to a |page_object|. If consecutive page objects
+/// have the same |mark|, the generated PDF will contain a single mark that spans
+/// all of them. If the page objects are not consecutive, multiple copies of the
+/// |mark| are inserted in the PDF.
+/// 
+/// page_object - handle to a page object.
+/// mark        - handle to a mark object.
+/// 
+/// Returns true on success, or false on failure. The handles are all owned by
+/// the library. The |page_object| and |mark| params must be associated with the
+/// same document.
+int FPDFPageObj_AddExistingMark(FPDF_PAGEOBJECT page_object,
+FPDF_PAGEOBJECTMARK mark,
+) {
+  return _FPDFPageObj_AddExistingMark(page_object,
+mark,
+);
+}
+
+late final _FPDFPageObj_AddExistingMarkPtr = _lookup<
+    ffi.NativeFunction<FPDF_BOOL Function(FPDF_PAGEOBJECT , FPDF_PAGEOBJECTMARK )>>('FPDFPageObj_AddExistingMark');
+late final _FPDFPageObj_AddExistingMark = _FPDFPageObj_AddExistingMarkPtr.asFunction<int Function(FPDF_PAGEOBJECT , FPDF_PAGEOBJECTMARK )>();
+
+/// Experimental API.
 /// Removes a content |mark| from a |page_object|.
 /// The mark handle will be invalid after the removal.
 /// 
@@ -4745,6 +4769,54 @@ late final _FPDFPageObj_SetDashArrayPtr = _lookup<
     ffi.NativeFunction<FPDF_BOOL Function(FPDF_PAGEOBJECT , ffi.Pointer<ffi.Float> , ffi.Size , ffi.Float )>>('FPDFPageObj_SetDashArray');
 late final _FPDFPageObj_SetDashArray = _FPDFPageObj_SetDashArrayPtr.asFunction<int Function(FPDF_PAGEOBJECT , ffi.Pointer<ffi.Float> , int , double )>();
 
+/// Experimental API.
+/// Get a bitmap rasterization of the stroke pattern of |page_object|.
+/// To render correctly, the caller must provide the |document| associated with
+/// |page_object|. The returned bitmap will be owned by the caller, and
+/// FPDFBitmap_Destroy() must be called on the returned bitmap when it is no
+/// longer needed.
+/// 
+/// document    - handle to the document containing |page_object|.
+/// page_object - handle to a page object.
+/// 
+/// Returns the bitmap, or NULL if the stroke is not a tiling pattern or on
+/// failure.
+FPDF_BITMAP FPDFPageObj_GetRenderedStrokePattern(FPDF_DOCUMENT document,
+FPDF_PAGEOBJECT page_object,
+) {
+  return _FPDFPageObj_GetRenderedStrokePattern(document,
+page_object,
+);
+}
+
+late final _FPDFPageObj_GetRenderedStrokePatternPtr = _lookup<
+    ffi.NativeFunction<FPDF_BITMAP Function(FPDF_DOCUMENT , FPDF_PAGEOBJECT )>>('FPDFPageObj_GetRenderedStrokePattern');
+late final _FPDFPageObj_GetRenderedStrokePattern = _FPDFPageObj_GetRenderedStrokePatternPtr.asFunction<FPDF_BITMAP Function(FPDF_DOCUMENT , FPDF_PAGEOBJECT )>();
+
+/// Experimental API.
+/// Get a bitmap rasterization of the fill pattern of |page_object|.
+/// To render correctly, the caller must provide the |document| associated with
+/// |page_object|. The returned bitmap will be owned by the caller, and
+/// FPDFBitmap_Destroy() must be called on the returned bitmap when it is no
+/// longer needed.
+/// 
+/// document    - handle to the document containing |page_object|.
+/// page_object - handle to a page object.
+/// 
+/// Returns the bitmap, or NULL if the fill is not a tiling pattern or on
+/// failure.
+FPDF_BITMAP FPDFPageObj_GetRenderedFillPattern(FPDF_DOCUMENT document,
+FPDF_PAGEOBJECT page_object,
+) {
+  return _FPDFPageObj_GetRenderedFillPattern(document,
+page_object,
+);
+}
+
+late final _FPDFPageObj_GetRenderedFillPatternPtr = _lookup<
+    ffi.NativeFunction<FPDF_BITMAP Function(FPDF_DOCUMENT , FPDF_PAGEOBJECT )>>('FPDFPageObj_GetRenderedFillPattern');
+late final _FPDFPageObj_GetRenderedFillPattern = _FPDFPageObj_GetRenderedFillPatternPtr.asFunction<FPDF_BITMAP Function(FPDF_DOCUMENT , FPDF_PAGEOBJECT )>();
+
 /// Get number of segments inside |path|.
 /// 
 /// path - handle to a path.
@@ -4913,6 +4985,34 @@ late final _FPDFPath_BezierToPtr = _lookup<
     ffi.NativeFunction<FPDF_BOOL Function(FPDF_PAGEOBJECT , ffi.Float , ffi.Float , ffi.Float , ffi.Float , ffi.Float , ffi.Float )>>('FPDFPath_BezierTo');
 late final _FPDFPath_BezierTo = _FPDFPath_BezierToPtr.asFunction<int Function(FPDF_PAGEOBJECT , double , double , double , double , double , double )>();
 
+/// Experimental API.
+/// Get the two control points of a cubic Bezier segment in |path| at |index|.
+/// 
+/// path                 - handle to a path.
+/// index                - the index of the endpoint of a cubic Bezier segment.
+/// first_control_point  - the first control point.
+/// second_control_point - the second control point.
+/// 
+/// Returns TRUE on success. Returns FALSE when |path| is not a valid path,
+/// |index| is out of bounds, the indexed segment is not the endpoint of a cubic
+/// Bezier segment, or either output pointer is NULL. On failure, the output
+/// parameters are not modified.
+int FPDFPath_GetBezierControlPoints(FPDF_PAGEOBJECT path,
+int index,
+ffi.Pointer<FS_POINTF> first_control_point,
+ffi.Pointer<FS_POINTF> second_control_point,
+) {
+  return _FPDFPath_GetBezierControlPoints(path,
+index,
+first_control_point,
+second_control_point,
+);
+}
+
+late final _FPDFPath_GetBezierControlPointsPtr = _lookup<
+    ffi.NativeFunction<FPDF_BOOL Function(FPDF_PAGEOBJECT , ffi.Size , ffi.Pointer<FS_POINTF> , ffi.Pointer<FS_POINTF> )>>('FPDFPath_GetBezierControlPoints');
+late final _FPDFPath_GetBezierControlPoints = _FPDFPath_GetBezierControlPointsPtr.asFunction<int Function(FPDF_PAGEOBJECT , int , ffi.Pointer<FS_POINTF> , ffi.Pointer<FS_POINTF> )>();
+
 /// Close the current subpath of a given path.
 /// 
 /// path   - the handle to the path object.
@@ -4999,7 +5099,8 @@ late final _FPDFPageObj_NewTextObj = _FPDFPageObj_NewTextObjPtr.asFunction<FPDF_
 /// text_object  - handle to the text object.
 /// text         - the UTF-16LE encoded string containing the text to be added.
 /// 
-/// Returns TRUE on success
+/// Returns TRUE on success. Fails if |text_object| is null or if |text| is
+/// empty.
 int FPDFText_SetText(FPDF_PAGEOBJECT text_object,
 FPDF_WIDESTRING text,
 ) {
@@ -5020,7 +5121,8 @@ late final _FPDFText_SetText = _FPDFText_SetTextPtr.asFunction<int Function(FPDF
 /// charcodes    - pointer to an array of charcodes to be added.
 /// count        - number of elements in |charcodes|.
 /// 
-/// Returns TRUE on success
+/// Returns TRUE on success. Fails if |text_object| or |charcodes| is null, or
+/// |count| is 0.
 int FPDFText_SetCharcodes(FPDF_PAGEOBJECT text_object,
 ffi.Pointer<ffi.Uint32> charcodes,
 int count,
@@ -5034,6 +5136,37 @@ count,
 late final _FPDFText_SetCharcodesPtr = _lookup<
     ffi.NativeFunction<FPDF_BOOL Function(FPDF_PAGEOBJECT , ffi.Pointer<ffi.Uint32> , ffi.Size )>>('FPDFText_SetCharcodes');
 late final _FPDFText_SetCharcodes = _FPDFText_SetCharcodesPtr.asFunction<int Function(FPDF_PAGEOBJECT , ffi.Pointer<ffi.Uint32> , int )>();
+
+/// Experimental API.
+/// Set the character positions for a text object.
+/// 
+/// text_object  - handle to the text object.
+/// positions    - pointer to an array of character positions to be set.
+/// count        - number of elements in |positions|.
+/// 
+/// The |positions| array specifies the position in points for each character
+/// except the first one. The first character has an implied position value of 0.
+/// All positions are relative to the origin of the text object. The direction is
+/// either horizontal or vertical, depending on the direction of text in
+/// |text_object|.
+/// 
+/// For a text object with N characters, |count| must be N - 1. Therefore this
+/// API fails when N <= 1.
+/// 
+/// Returns TRUE on success.
+int FPDFText_SetPositions(FPDF_PAGEOBJECT text_object,
+ffi.Pointer<ffi.Float> positions,
+int count,
+) {
+  return _FPDFText_SetPositions(text_object,
+positions,
+count,
+);
+}
+
+late final _FPDFText_SetPositionsPtr = _lookup<
+    ffi.NativeFunction<FPDF_BOOL Function(FPDF_PAGEOBJECT , ffi.Pointer<ffi.Float> , ffi.Size )>>('FPDFText_SetPositions');
+late final _FPDFText_SetPositions = _FPDFText_SetPositionsPtr.asFunction<int Function(FPDF_PAGEOBJECT , ffi.Pointer<ffi.Float> , int )>();
 
 /// Returns a font object loaded from a stream of data. The font is loaded
 /// into the document. Various font data structures, such as the ToUnicode data,
@@ -5143,6 +5276,28 @@ size,
 late final _FPDFTextObj_GetFontSizePtr = _lookup<
     ffi.NativeFunction<FPDF_BOOL Function(FPDF_PAGEOBJECT , ffi.Pointer<ffi.Float> )>>('FPDFTextObj_GetFontSize');
 late final _FPDFTextObj_GetFontSize = _FPDFTextObj_GetFontSizePtr.asFunction<int Function(FPDF_PAGEOBJECT , ffi.Pointer<ffi.Float> )>();
+
+/// Experimental API.
+/// Set the font size of a text object.
+/// 
+/// text - handle to a text page object.
+/// size - the new font size, measured in points (1/72 inch). Must be
+/// non-negative; zero is permitted to mirror
+/// FPDFPageObj_NewTextObj() with size 0.
+/// 
+/// Returns TRUE on success. Returns FALSE when |text| is not a text
+/// page object, or when |size| is negative.
+int FPDFTextObj_SetFontSize(FPDF_PAGEOBJECT text,
+double size,
+) {
+  return _FPDFTextObj_SetFontSize(text,
+size,
+);
+}
+
+late final _FPDFTextObj_SetFontSizePtr = _lookup<
+    ffi.NativeFunction<FPDF_BOOL Function(FPDF_PAGEOBJECT , ffi.Float )>>('FPDFTextObj_SetFontSize');
+late final _FPDFTextObj_SetFontSize = _FPDFTextObj_SetFontSizePtr.asFunction<int Function(FPDF_PAGEOBJECT , double )>();
 
 /// Close a loaded PDF font.
 /// 
@@ -5841,6 +5996,54 @@ late final _FPDFAttachment_GetStringValuePtr = _lookup<
 late final _FPDFAttachment_GetStringValue = _FPDFAttachment_GetStringValuePtr.asFunction<int Function(FPDF_ATTACHMENT , FPDF_BYTESTRING , ffi.Pointer<FPDF_WCHAR> , int )>();
 
 /// Experimental API.
+/// Sets the string value corresponding to "/Desc" in the file specification
+/// dictionary (ISO 32000-1:2008 section 7.11.3) of the embedded file
+/// |attachment| to the string value.
+/// 
+/// attachment - handle to an attachment.
+/// value      - the string value to be set as /Desc, encoded in UTF-16LE.
+/// 
+/// Returns true if successful.
+int FPDFAttachment_SetDescription(FPDF_ATTACHMENT attachment,
+FPDF_WIDESTRING value,
+) {
+  return _FPDFAttachment_SetDescription(attachment,
+value,
+);
+}
+
+late final _FPDFAttachment_SetDescriptionPtr = _lookup<
+    ffi.NativeFunction<FPDF_BOOL Function(FPDF_ATTACHMENT , FPDF_WIDESTRING )>>('FPDFAttachment_SetDescription');
+late final _FPDFAttachment_SetDescription = _FPDFAttachment_SetDescriptionPtr.asFunction<int Function(FPDF_ATTACHMENT , FPDF_WIDESTRING )>();
+
+/// Experimental API.
+/// Gets the string value corresponding to "/Desc" in the file specification
+/// dictionary (ISO 32000-1:2008 section 7.11.3) of the embedded file
+/// |attachment|. Similarly to the above APIs, |buffer| is only modified if
+/// |buflen| is longer than the length of the string's value. If the key doesn't
+/// exist, or is not a string then 2 is returned by the API, alongside an empty
+/// string. Other errors return 0 instead.
+/// 
+/// attachment - handle to an attachment.
+/// buffer     - buffer for holding the string value encoded in UTF-16LE.
+/// buflen     - length of the buffer in bytes.
+/// 
+/// Returns the length of the description string in bytes.
+int FPDFAttachment_GetDescription(FPDF_ATTACHMENT attachment,
+ffi.Pointer<FPDF_WCHAR> buffer,
+int buflen,
+) {
+  return _FPDFAttachment_GetDescription(attachment,
+buffer,
+buflen,
+);
+}
+
+late final _FPDFAttachment_GetDescriptionPtr = _lookup<
+    ffi.NativeFunction<ffi.UnsignedLong Function(FPDF_ATTACHMENT , ffi.Pointer<FPDF_WCHAR> , ffi.UnsignedLong )>>('FPDFAttachment_GetDescription');
+late final _FPDFAttachment_GetDescription = _FPDFAttachment_GetDescriptionPtr.asFunction<int Function(FPDF_ATTACHMENT , ffi.Pointer<FPDF_WCHAR> , int )>();
+
+/// Experimental API.
 /// Set the file data of |attachment|, overwriting the existing file data if any.
 /// The creation date and checksum will be updated, while all other dictionary
 /// entries will be deleted. Note that only contents with |len| smaller than
@@ -5926,6 +6129,35 @@ buflen,
 late final _FPDFAttachment_GetSubtypePtr = _lookup<
     ffi.NativeFunction<ffi.UnsignedLong Function(FPDF_ATTACHMENT , ffi.Pointer<FPDF_WCHAR> , ffi.UnsignedLong )>>('FPDFAttachment_GetSubtype');
 late final _FPDFAttachment_GetSubtype = _FPDFAttachment_GetSubtypePtr.asFunction<int Function(FPDF_ATTACHMENT , ffi.Pointer<FPDF_WCHAR> , int )>();
+
+/// Experimental API.
+/// Get the associated file relationship string (the /AFRelationship entry in
+/// the file specification dictionary of the embedded file |attachment|; PDF
+/// 2.0, ISO 32000-2:2020, Table 43), e.g. "Source", "Data", "Alternative",
+/// "Supplement" or "Unspecified". |buffer| is only modified if |buflen| is
+/// longer than the length of the relationship name. If the /AFRelationship
+/// entry is absent or is not a name, an empty string is copied to |buffer| and
+/// the return value is 2. On other errors, |buffer| is not modified and the
+/// return value is 0.
+/// 
+/// attachment - handle to an attachment.
+/// buffer     - buffer for holding the relationship name encoded in UTF-16LE.
+/// buflen     - length of the buffer in bytes.
+/// 
+/// Returns the length of the relationship name in bytes.
+int FPDFAttachment_GetAFRelationship(FPDF_ATTACHMENT attachment,
+ffi.Pointer<FPDF_WCHAR> buffer,
+int buflen,
+) {
+  return _FPDFAttachment_GetAFRelationship(attachment,
+buffer,
+buflen,
+);
+}
+
+late final _FPDFAttachment_GetAFRelationshipPtr = _lookup<
+    ffi.NativeFunction<ffi.UnsignedLong Function(FPDF_ATTACHMENT , ffi.Pointer<FPDF_WCHAR> , ffi.UnsignedLong )>>('FPDFAttachment_GetAFRelationship');
+late final _FPDFAttachment_GetAFRelationship = _FPDFAttachment_GetAFRelationshipPtr.asFunction<int Function(FPDF_ATTACHMENT , ffi.Pointer<FPDF_WCHAR> , int )>();
 
 /// Function: FPDFDOC_InitFormFillEnvironment
 /// Initialize form fill environment.
@@ -7021,6 +7253,56 @@ late final _FORM_IsIndexSelectedPtr = _lookup<
     ffi.NativeFunction<FPDF_BOOL Function(FPDF_FORMHANDLE , FPDF_PAGE , ffi.Int )>>('FORM_IsIndexSelected');
 late final _FORM_IsIndexSelected = _FORM_IsIndexSelectedPtr.asFunction<int Function(FPDF_FORMHANDLE , FPDF_PAGE , int )>();
 
+/// Experimental API
+/// Function: FORM_GetTextDirection
+/// Returns the text direction of the given form field annotation.
+/// Parameters:
+/// handle      -   Handle to the form fill module. Returned by
+/// FPDFDOC_InitFormFillEnvironment.
+/// annot       -   Handle to the form field annotation.
+/// Return Value:
+/// The in-memory text direction of the given form field annotation.
+/// If the operation fails (e.g., invalid handle), returns
+/// FPDF_TEXTDIR_UNKNOWN.
+FPDF_TEXT_DIRECTION FORM_GetTextDirection(FPDF_FORMHANDLE handle,
+FPDF_ANNOTATION annot,
+) {
+  return FPDF_TEXT_DIRECTION.fromValue(_FORM_GetTextDirection(handle,
+annot,
+));
+}
+
+late final _FORM_GetTextDirectionPtr = _lookup<
+    ffi.NativeFunction<ffi.UnsignedInt Function(FPDF_FORMHANDLE , FPDF_ANNOTATION )>>('FORM_GetTextDirection');
+late final _FORM_GetTextDirection = _FORM_GetTextDirectionPtr.asFunction<int Function(FPDF_FORMHANDLE , FPDF_ANNOTATION )>();
+
+/// Experimental API
+/// Function: FORM_SetTextDirection
+/// Sets the text direction of the given form field annotation.
+/// Parameters:
+/// handle      -   Handle to the form fill module. Returned by
+/// FPDFDOC_InitFormFillEnvironment.
+/// annot       -   Handle to the form field annotation.
+/// direction   -   The new text direction. Passing
+/// FPDF_TEXTDIR_UNKNOWN will fail and return FALSE.
+/// Note: This only alters the in-memory state of the
+/// form field and does not modify the PDF document.
+/// Return Value:
+/// TRUE on success, FALSE otherwise.
+DartFPDF_BOOL FORM_SetTextDirection(FPDF_FORMHANDLE handle,
+FPDF_ANNOTATION annot,
+FPDF_TEXT_DIRECTION direction,
+) {
+  return _FORM_SetTextDirection(handle,
+annot,
+direction.value,
+);
+}
+
+late final _FORM_SetTextDirectionPtr = _lookup<
+    ffi.NativeFunction<FPDF_BOOL Function(FPDF_FORMHANDLE , FPDF_ANNOTATION , ffi.UnsignedInt )>>('FORM_SetTextDirection');
+late final _FORM_SetTextDirection = _FORM_SetTextDirectionPtr.asFunction<int Function(FPDF_FORMHANDLE , FPDF_ANNOTATION , int )>();
+
 /// Function: FPDF_LoadXFA
 /// If the document consists of XFA fields, call this method to
 /// attempt to load XFA fields.
@@ -7535,10 +7817,7 @@ late final _FPDFAnnot_GetAttachmentPointsPtr = _lookup<
 late final _FPDFAnnot_GetAttachmentPoints = _FPDFAnnot_GetAttachmentPointsPtr.asFunction<int Function(FPDF_ANNOTATION , int , ffi.Pointer<FS_QUADPOINTSF> )>();
 
 /// Experimental API.
-/// Set the annotation rectangle defining the location of the annotation. If the
-/// annotation's appearance stream is defined and this annotation is of a type
-/// without quadpoints, then update the bounding box too if the new rectangle
-/// defines a bigger one.
+/// Set the annotation rectangle defining the location of the annotation.
 /// 
 /// annot  - handle to an annotation.
 /// rect   - the annotation rectangle to be set.
@@ -8748,7 +9027,8 @@ late final _FPDF_ImportNPagesToOne = _FPDF_ImportNPagesToOnePtr.asFunction<FPDF_
 /// |src_page_index|, for use in |dest_doc|.
 /// 
 /// Returns a handle on success, or NULL on failure. Caller owns the newly
-/// created object.
+/// created object. The returned handle's lifetime is tied to |dest_doc| and not
+/// |src_doc|. It must be closed before |dest_doc|.
 FPDF_XOBJECT FPDF_NewXObjectFromPage(FPDF_DOCUMENT dest_doc,
 FPDF_DOCUMENT src_doc,
 int src_page_index,
@@ -9010,6 +9290,53 @@ FPDF_ACTION FPDFBookmark_GetAction(FPDF_BOOKMARK bookmark,
 late final _FPDFBookmark_GetActionPtr = _lookup<
     ffi.NativeFunction<FPDF_ACTION Function(FPDF_BOOKMARK )>>('FPDFBookmark_GetAction');
 late final _FPDFBookmark_GetAction = _FPDFBookmark_GetActionPtr.asFunction<FPDF_ACTION Function(FPDF_BOOKMARK )>();
+
+/// Experimental API.
+/// Get the color of a bookmark.
+/// 
+/// bookmark - handle to a bookmark.
+/// R        - pointer to a float to receive the red component [0.0 - 1.0].
+/// G        - pointer to a float to receive the green component [0.0 - 1.0].
+/// B        - pointer to a float to receive the blue component [0.0 - 1.0].
+/// 
+/// Returns TRUE on success, in which case |R|, |G|, and |B| are updated.
+/// Returns FALSE on failure, if the bookmark is invalid, output for R, G and B
+/// aren't in the range or if the bookmark does not specify a color.
+int FPDFBookmark_GetColor(FPDF_BOOKMARK bookmark,
+ffi.Pointer<ffi.Float> R,
+ffi.Pointer<ffi.Float> G,
+ffi.Pointer<ffi.Float> B,
+) {
+  return _FPDFBookmark_GetColor(bookmark,
+R,
+G,
+B,
+);
+}
+
+late final _FPDFBookmark_GetColorPtr = _lookup<
+    ffi.NativeFunction<FPDF_BOOL Function(FPDF_BOOKMARK , ffi.Pointer<ffi.Float> , ffi.Pointer<ffi.Float> , ffi.Pointer<ffi.Float> )>>('FPDFBookmark_GetColor');
+late final _FPDFBookmark_GetColor = _FPDFBookmark_GetColorPtr.asFunction<int Function(FPDF_BOOKMARK , ffi.Pointer<ffi.Float> , ffi.Pointer<ffi.Float> , ffi.Pointer<ffi.Float> )>();
+
+/// Experimental API.
+/// Get the text style of a bookmark.
+/// 
+/// bookmark - handle to a bookmark.
+/// 
+/// Returns the style as an integer, in line with ISO 32000-1:2008 Table 154.
+/// The first bit is used to represent if the text is italic and the second
+/// bit is used to represent if the text is bold. Returns 0 if the bookmark
+/// doesn't have styling or if the handle is invalid. Parsing this value to
+/// apply styles remains the responsibility of the embedder.
+int FPDFBookmark_GetStyle(FPDF_BOOKMARK bookmark,
+) {
+  return _FPDFBookmark_GetStyle(bookmark,
+);
+}
+
+late final _FPDFBookmark_GetStylePtr = _lookup<
+    ffi.NativeFunction<ffi.Int Function(FPDF_BOOKMARK )>>('FPDFBookmark_GetStyle');
+late final _FPDFBookmark_GetStyle = _FPDFBookmark_GetStylePtr.asFunction<int Function(FPDF_BOOKMARK )>();
 
 /// Get the type of |action|.
 /// 
@@ -9446,7 +9773,10 @@ late final _FPDF_GetFileIdentifier = _FPDF_GetFileIdentifierPtr.asFunction<int F
 /// buffer   - a buffer for the tag. May be NULL.
 /// buflen   - the length of the buffer, in bytes. May be 0.
 /// 
-/// Returns the number of bytes in the tag, including trailing zeros.
+/// Returns the number of bytes in the tag, including trailing zeros, on success.
+/// Returns 0 if |document| or |tag| is NULL. Returns 0 if |document| does not
+/// have an /Info dictionary. Returns 2 for an empty string if |tag| is not in
+/// the /Info dictionary,
 /// 
 /// The |buffer| is always encoded in UTF-16LE. The |buffer| is followed by two
 /// bytes of zeros indicating the end of the string.  If |buflen| is less than
@@ -9778,6 +10108,36 @@ int FPDF_StructElement_GetMarkedContentID(FPDF_STRUCTELEMENT struct_element,
 late final _FPDF_StructElement_GetMarkedContentIDPtr = _lookup<
     ffi.NativeFunction<ffi.Int Function(FPDF_STRUCTELEMENT )>>('FPDF_StructElement_GetMarkedContentID');
 late final _FPDF_StructElement_GetMarkedContentID = _FPDF_StructElement_GetMarkedContentIDPtr.asFunction<int Function(FPDF_STRUCTELEMENT )>();
+
+/// Experimental API.
+/// Function: FPDF_StructElement_GetRawType
+/// Get the raw value of the /S entry for a given element.
+/// Parameters:
+/// struct_element -   Handle to the struct element.
+/// buffer         -   A FPDF_WCHAR buffer for output text. May be NULL.
+/// buflen         -   The length of the buffer. May be 0.
+/// Return value:
+/// The number of bytes in the text, including the terminating NUL
+/// character. The number of bytes is returned regardless of the
+/// |buffer| and |buflen| parameters.
+/// Comments:
+/// Regardless of the platform, the |buffer| is always in UTF-16LE
+/// encoding. The string is terminated by a UTF16 NUL character. If
+/// |buflen| is less than the required length, or |buffer| is NULL,
+/// |buffer| will not be modified.
+int FPDF_StructElement_GetRawType(FPDF_STRUCTELEMENT struct_element,
+ffi.Pointer<FPDF_WCHAR> buffer,
+int buflen,
+) {
+  return _FPDF_StructElement_GetRawType(struct_element,
+buffer,
+buflen,
+);
+}
+
+late final _FPDF_StructElement_GetRawTypePtr = _lookup<
+    ffi.NativeFunction<ffi.UnsignedLong Function(FPDF_STRUCTELEMENT , ffi.Pointer<FPDF_WCHAR> , ffi.Size )>>('FPDF_StructElement_GetRawType');
+late final _FPDF_StructElement_GetRawType = _FPDF_StructElement_GetRawTypePtr.asFunction<int Function(FPDF_STRUCTELEMENT , ffi.Pointer<FPDF_WCHAR> , int )>();
 
 /// Function: FPDF_StructElement_GetType
 /// Get the type (/S) for a given element.
@@ -11517,8 +11877,7 @@ final class FPDF_LIBRARY_CONFIG_ extends ffi.Struct{
 
 FPDF_RENDERER_TYPE get m_RendererType => FPDF_RENDERER_TYPE.fromValue(m_RendererTypeAsInt);
 
-  /// Explicit specification of font library to use when |m_RendererType| is set
-  /// to |FPDF_RENDERERTYPE_SKIA|.
+  /// Explicit specification of font library to use.
   /// |m_FontLibraryType| must be a valid value for |FPDF_LIBRARY_CONFIG|
   /// versions of this level or higher, or else the initialization will fail with
   /// an immediate crash.
@@ -11529,6 +11888,17 @@ FPDF_RENDERER_TYPE get m_RendererType => FPDF_RENDERER_TYPE.fromValue(m_Renderer
   external int m_FontLibraryTypeAsInt;
 
 FPDF_FONT_BACKEND_TYPE get m_FontLibraryType => FPDF_FONT_BACKEND_TYPE.fromValue(m_FontLibraryTypeAsInt);
+
+  /// Boolean to specify whether the experimental PDF 2.0 /BrotliDecode filter
+  /// is enabled. For setting the bool to true to have an effect, PDFium must be
+  /// built with |PDF_ENABLE_BROTLI|.
+  @FPDF_BOOL()
+  external int m_BrotliEnabled;
+
+  /// Boolean to specify whether PDFium creates a dedicated v8::Isolate for each
+  /// document. When true, |m_pIsolate| must be NULL.
+  @FPDF_BOOL()
+  external int m_IsolatePerDocument;
 
 }
 
@@ -11887,6 +12257,30 @@ final class FPDF_IMAGEOBJ_METADATA extends ffi.Struct{
   /// A value of -1 indicates no ID.
   @ffi.Int()
   external int marked_content_id;
+
+}
+
+/// Text direction for form fields.
+enum FPDF_TEXT_DIRECTION {
+  /// Unknown or error state.
+  FPDF_TEXTDIR_UNKNOWN(0),
+  /// Represents the default layout behavior. This means the text direction is
+  /// determined by the Unicode Bidi Algorithm.
+  FPDF_TEXTDIR_AUTO(1),
+  FPDF_TEXTDIR_LTR(2),
+  FPDF_TEXTDIR_RTL(3);
+
+
+  final int value;
+  const FPDF_TEXT_DIRECTION(this.value);
+
+  static FPDF_TEXT_DIRECTION fromValue(int value) => switch (value) {
+    0 => FPDF_TEXTDIR_UNKNOWN,
+    1 => FPDF_TEXTDIR_AUTO,
+    2 => FPDF_TEXTDIR_LTR,
+    3 => FPDF_TEXTDIR_RTL,
+    _ => throw ArgumentError('Unknown value for FPDF_TEXT_DIRECTION: $value'),
+  };
 
 }
 
@@ -13285,40 +13679,51 @@ final class _UNSUPPORT_INFO extends ffi.Struct{
 
 /// Interface for unsupported feature notifications.
 typedef UNSUPPORT_INFO = _UNSUPPORT_INFO;
-typedef __time_t = ffi.Long;
-typedef Dart__time_t = int;
-typedef time_t = __time_t;
+typedef __darwin_time_t = ffi.Long;
+typedef Dart__darwin_time_t = int;
+typedef time_t = __darwin_time_t;
 final class tm extends ffi.Struct{
+  /// seconds after the minute [0-60]
   @ffi.Int()
   external int tm_sec;
 
+  /// minutes after the hour [0-59]
   @ffi.Int()
   external int tm_min;
 
+  /// hours since midnight [0-23]
   @ffi.Int()
   external int tm_hour;
 
+  /// day of the month [1-31]
   @ffi.Int()
   external int tm_mday;
 
+  /// months since January [0-11]
   @ffi.Int()
   external int tm_mon;
 
+  /// years since 1900
   @ffi.Int()
   external int tm_year;
 
+  /// days since Sunday [0-6]
   @ffi.Int()
   external int tm_wday;
 
+  /// days since January 1 [0-365]
   @ffi.Int()
   external int tm_yday;
 
+  /// Daylight Savings Time flag
   @ffi.Int()
   external int tm_isdst;
 
+  /// offset from UTC in seconds
   @ffi.Long()
   external int tm_gmtoff;
 
+  /// timezone abbreviation
   external ffi.Pointer<ffi.Char> tm_zone;
 
 }

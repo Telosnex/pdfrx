@@ -1,13 +1,14 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
 import 'package:code_assets/code_assets.dart';
+import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_c/native_toolchain_c.dart';
 
 import '../lib/src/proxy_http_client.dart';
 
-const _pdfiumRelease = 'chromium%2F8125';
 const _assetName = 'libpdfium';
 
 void main(List<String> args) async {
@@ -26,8 +27,23 @@ void main(List<String> args) async {
 
     if (input.config.code.targetOS == OS.iOS) return;
 
+    // The PDFium release and each archive's SHA-256, shared with
+    // tool/ffigen.dart and the web and Apple builds.
+    final pinFile = input.packageRoot.resolve('pdfium.json');
+    output.dependencies.add(pinFile);
+    final pins =
+        jsonDecode(await File.fromUri(pinFile).readAsString())
+            as Map<String, Object?>;
+    final release = pins['release'] as String;
     final target = _PdfiumTarget.fromCodeConfig(input.config.code);
-    final outputSubdir = _pdfiumRelease.replaceAll('%2F', '_');
+    final archiveName = '${target.archivePlatform}-${target.archiveArch}';
+    final archivePin =
+        (pins['archives'] as Map<String, Object?>)[archiveName]
+            as Map<String, Object?>?;
+    if (archivePin == null) {
+      throw UnsupportedError('pdfium.json pins no PDFium for $archiveName.');
+    }
+    final outputSubdir = release.replaceAll('/', '_');
     final outputFile = input.outputDirectoryShared.resolve(
       '$outputSubdir/${target.archivePlatform}-${target.archiveArch}/${target.libraryFileName}',
     );
@@ -35,7 +51,8 @@ void main(List<String> args) async {
     await _downloadPdfium(
       outputFile: outputFile,
       target: target,
-      pdfiumRelease: _pdfiumRelease,
+      pdfiumRelease: release,
+      sha256Hex: archivePin['sha256'] as String,
     );
 
     output.assets.code.add(
@@ -53,19 +70,29 @@ Future<void> _downloadPdfium({
   required Uri outputFile,
   required _PdfiumTarget target,
   required String pdfiumRelease,
+  required String sha256Hex,
 }) async {
   final output = File.fromUri(outputFile);
   if (await output.exists()) return;
 
   final archiveUri = Uri.parse(
     'https://github.com/bblanchon/pdfium-binaries/releases/download/'
-    '$pdfiumRelease/pdfium-${target.archivePlatform}-${target.archiveArch}.tgz',
+    '${pdfiumRelease.replaceAll('/', '%2F')}/'
+    'pdfium-${target.archivePlatform}-${target.archiveArch}.tgz',
   );
 
   final response = await getWithRetries(archiveUri);
   if (response.statusCode != 200) {
     throw Exception(
       'Failed to download PDFium: HTTP ${response.statusCode} $archiveUri',
+    );
+  }
+
+  final actual = sha256.convert(response.bodyBytes).toString();
+  if (actual != sha256Hex) {
+    throw Exception(
+      'PDFium archive $archiveUri has SHA-256 $actual; pdfium.json pins '
+      '$sha256Hex.',
     );
   }
 
