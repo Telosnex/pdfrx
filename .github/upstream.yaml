@@ -4,5 +4,5 @@ sources:
   - name: PDFium (pdfium-binaries)
     tags: https://github.com/bblanchon/pdfium-binaries.git
     version: 'chromium/(\d+)'
-    pin: {file: packages/pdfium_dart/hook/build.dart, pattern: "_pdfiumRelease = 'chromium%2F(\\d+)'"}
+    pin: {file: packages/pdfium_dart/pdfium.json, pattern: '"release": "chromium/(\d+)"'}
     alert: major
