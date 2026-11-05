@@ -83,8 +83,7 @@ Future<void> main(List<String> args) async {
         'archives': pins,
         'wasm': {'sha256': sha256.convert(wasm).toString()},
         // Kept only while it was built from this release.
-        if (xcframework != null && xcframework['release'] == release)
-          'xcframework': xcframework,
+        if (xcframework != null && xcframework['release'] == release) 'xcframework': xcframework,
       })}\n',
     );
     stdout.writeln('''
@@ -140,9 +139,14 @@ List<int> _member(Directory dir, String archive, String path) {
 
 String _version(Directory dir, String archive) {
   final fields = {
-    for (final line in utf8.decode(_member(dir, archive, 'VERSION')).split('\n'))
+    for (final line
+        in utf8.decode(_member(dir, archive, 'VERSION')).split('\n'))
       if (line.contains('=')) line.split('=')[0]: line.split('=')[1].trim(),
   };
-  return [fields['MAJOR'], fields['MINOR'], fields['BUILD'], fields['PATCH']]
-      .join('.');
+  return [
+    fields['MAJOR'],
+    fields['MINOR'],
+    fields['BUILD'],
+    fields['PATCH'],
+  ].join('.');
 }

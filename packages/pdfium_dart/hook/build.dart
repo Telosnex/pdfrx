@@ -31,9 +31,9 @@ void main(List<String> args) async {
     // tool/ffigen.dart and the web and Apple builds.
     final pinFile = input.packageRoot.resolve('pdfium.json');
     output.dependencies.add(pinFile);
-    final pins =
-        jsonDecode(await File.fromUri(pinFile).readAsString())
-            as Map<String, Object?>;
+    final pins = jsonDecode(
+      await File.fromUri(pinFile).readAsString(),
+    ) as Map<String, Object?>;
     final release = pins['release'] as String;
     final target = _PdfiumTarget.fromCodeConfig(input.config.code);
     final archiveName = '${target.archivePlatform}-${target.archiveArch}';

@@ -80,10 +80,13 @@ Future<void> _downloadHeaders({required bool force}) async {
     }
     final pins = jsonDecode(File('pdfium.json').readAsStringSync()) as Map;
     final expected =
-        (pins['archives'] as Map)['$_downloadPlatform-$_downloadArch']['sha256'];
+        (pins['archives']
+            as Map)['$_downloadPlatform-$_downloadArch']['sha256'];
     final actual = sha256.convert(response.bodyBytes).toString();
     if (actual != expected) {
-      throw Exception('$archiveUri has SHA-256 $actual; pdfium.json pins $expected.');
+      throw Exception(
+        '$archiveUri has SHA-256 $actual; pdfium.json pins $expected.',
+      );
     }
 
     final archive = TarDecoder().decodeBytes(

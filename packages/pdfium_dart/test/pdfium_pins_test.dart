@@ -11,9 +11,9 @@ import 'package:crypto/crypto.dart';
 import 'package:test/test.dart';
 
 void main() {
-  final pins =
-      jsonDecode(File('pdfium.json').readAsStringSync())
-          as Map<String, dynamic>;
+  final pins = jsonDecode(
+    File('pdfium.json').readAsStringSync(),
+  ) as Map<String, dynamic>;
   final archives = pins['archives'] as Map<String, dynamic>;
   final monorepo = Directory('../pdfium_flutter').existsSync();
 
@@ -40,9 +40,8 @@ void main() {
 
   test('podspec and Package.swift use the pinned XCFramework', () {
     final xcframework = pins['xcframework'] as Map<String, dynamic>;
-    final podspec = File(
-      '../pdfium_flutter/darwin/pdfium_flutter.podspec',
-    ).readAsStringSync();
+    final podspec = File('../pdfium_flutter/darwin/pdfium_flutter.podspec')
+        .readAsStringSync();
     final package = File(
       '../pdfium_flutter/darwin/pdfium_flutter/Package.swift',
     ).readAsStringSync();
@@ -54,9 +53,6 @@ void main() {
 
   test('the web uses the pinned pdfium.wasm', () {
     final wasm = File('../pdfrx/assets/pdfium.wasm').readAsBytesSync();
-    expect(
-      sha256.convert(wasm).toString(),
-      (pins['wasm'] as Map)['sha256'],
-    );
+    expect(sha256.convert(wasm).toString(), (pins['wasm'] as Map)['sha256']);
   }, skip: monorepo ? false : 'Not in the pdfrx repository');
 }
