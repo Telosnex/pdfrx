@@ -76,6 +76,16 @@ jobs:
       DEVICE: macos
     steps: *desktop_steps
 
+  # The steps of macOS ARM64 on an Intel runner: the app ships a universal
+  # macOS build.
+  desktop-macos-x64:
+    name: macOS x64
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    env:
+      DEVICE: macos
+    steps: *desktop_steps
+
   desktop-windows-x64:
     name: Windows x64
     runs-on: windows-2025
