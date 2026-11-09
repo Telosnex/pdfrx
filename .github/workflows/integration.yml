@@ -84,6 +84,14 @@ jobs:
       DEVICE: windows
     steps: *desktop_steps
 
+  desktop-windows-arm64:
+    name: Windows ARM64
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    env:
+      DEVICE: windows
+    steps: *desktop_steps
+
   # The web jobs share the steps of the first (YAML anchor). The tests of
   # integration_test/all.dart run in Chrome through the WebDriver of
   # actions/web-driver; require-result fails a run that skipped them.
