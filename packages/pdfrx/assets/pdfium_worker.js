@@ -695,9 +695,24 @@ const emEnv = {
       return func(a, b, c, d);
     });
   },
+  invoke_iiiiiii: function (index, a, b, c, d, e, f) {
+    return Pdfium.invokeFunc(index, function (func) {
+      return func(a, b, c, d, e, f);
+    });
+  },
   invoke_v: function (index) {
     return Pdfium.invokeFunc(index, function (func) {
       func();
+    });
+  },
+  invoke_vi: function (index, a) {
+    Pdfium.invokeFunc(index, function (func) {
+      func(a);
+    });
+  },
+  invoke_vii: function (index, a, b) {
+    Pdfium.invokeFunc(index, function (func) {
+      func(a, b);
     });
   },
   invoke_viii: function (index, a, b, c) {
