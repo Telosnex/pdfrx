@@ -1,8 +1,15 @@
 # Upstream sources, checked daily by the Upstream watch workflow
 # (telosnex_ci_tools, lib/src/upstream.dart). Set `seen` to skip an update.
 sources:
-  - name: PDFium (pdfium-binaries)
+  - name: bblanchon/pdfium-binaries
     tags: https://github.com/bblanchon/pdfium-binaries.git
     version: 'chromium/(\d+)'
     pin: {file: packages/pdfium_dart/pdfium.json, pattern: '"release": "chromium/(\d+)"'}
     alert: major
+  # The repository this one is a fork of. The pin is the last upstream commit
+  # merged here: update it with each merge. Upstream commits often, so alert
+  # only once the oldest unmerged commit is a week old.
+  - name: espresso3389/pdfrx
+    branch: https://github.com/espresso3389/pdfrx
+    pin: b500740c3952af87502aa33dbc0bba900783f397
+    lag_days: 7
