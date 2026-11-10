@@ -23,8 +23,8 @@ let package = Package(
         ),
         .binaryTarget(
             name: "PDFium",
-            url: "https://github.com/Telosnex/pdfrx/releases/download/pdfium-xcframework-chromium-8138/PDFium-chromium-8138-20261105-001403.xcframework.zip",
-            checksum: "b0c1c67b00ece10b7aae09098b5d19b9638def824961910806a4efb0dfd814a8"
+            url: "https://github.com/Telosnex/pdfrx/releases/download/pdfium-xcframework-chromium-8152/PDFium-chromium-8152-20261110-180141.xcframework.zip",
+            checksum: "e56fba3434c2da7aa582989d3d0910945dc1c21148fcf85b951ed341522ef25d"
         ),
     ]
 )
