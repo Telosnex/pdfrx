@@ -424,6 +424,8 @@ class _PdfViewerState extends State<PdfViewer>
     if (!identical(widget.fontManager, oldWidget.fontManager)) {
       _updateFontManagerAssociation();
     }
+    if (!widget.params.isVisible) _paintedVisiblePages = null;
+    _controller?._visibleRenderState.update();
   }
 
   void _updateInteractionDelegate() {
@@ -492,6 +494,11 @@ class _PdfViewerState extends State<PdfViewer>
     // through so the loading banner keeps updating.
     final currentDocument = widget.documentRef.resolveListenable().document;
     if (_document != null && identical(currentDocument, _document)) {
+      // A new documentRef may resolve to the document already shown; it then stays valid for the new reference.
+      if (_documentRefKey != widget.documentRef.key) {
+        _documentRefKey = widget.documentRef.key;
+        _controller?._visibleRenderState.update();
+      }
       return;
     }
 
@@ -515,6 +522,7 @@ class _PdfViewerState extends State<PdfViewer>
     _stopInteraction();
     _imageCache.releaseAllImages();
     _magnifierImageCache.releaseAllImages();
+    _paintedVisiblePages = null;
     _canvasLinkPainter.resetAll();
     _textCacheLease?.dispose();
     _textCacheLease = null;
@@ -549,6 +557,7 @@ class _PdfViewerState extends State<PdfViewer>
     }
 
     _document = document;
+    _documentRefKey = widget.documentRef.key;
     _textCache = PdfPageTextCache.forDocument(document);
     _textCacheLease = _textCache!.createLease();
 
@@ -670,6 +679,7 @@ class _PdfViewerState extends State<PdfViewer>
     widget.documentRef.resolveListenable().removeListener(_onDocumentChanged);
     _imageCache.releaseAllImages();
     _magnifierImageCache.releaseAllImages();
+    _paintedVisiblePages = null;
     _canvasLinkPainter.resetAll();
     _txController.removeListener(_onMatrixChanged);
     _controller?._attach(null);
@@ -709,8 +719,8 @@ class _PdfViewerState extends State<PdfViewer>
       _layoutDirty = true;
       // FIXME: We can handle the event more efficiently by only updating the affected pages.
       for (final change in event.changes.entries) {
-        _imageCache.cancelPendingPartialRendering(change.key);
-        _magnifierImageCache.cancelPendingPartialRendering(change.key);
+        _imageCache.cancelPendingRenderings(change.key);
+        _magnifierImageCache.cancelPendingRenderings(change.key);
         _imageCache.makeCacheImageForPageDirty(change.key, page: change.value.page);
         _magnifierImageCache.makeCacheImageForPageDirty(change.key, page: change.value.page);
         _canvasLinkPainter.releaseLinksForPage(change.key);
@@ -1750,15 +1760,25 @@ class _PdfViewerState extends State<PdfViewer>
         ..._magnifierImageCache.pageImages.values,
         ..._magnifierImageCache.pageImagesPartial.values,
       ]) {
-        image.budgetEntry?.touch(isPinned: false);
+        image.budgetEntry?.touch(isPinned: false, isNeeded: false);
       }
     }
     _updateTextCachePins();
+    final visibleRect = _visibleRect;
+    // Only scrolling sets the direction: a zoom restarts the measure, and small corrections are ignored.
+    final anchor = _directionAnchor;
+    if (anchor == null || _directionZoom != _currentZoom) {
+      _directionAnchor = visibleRect.center;
+      _directionZoom = _currentZoom;
+    } else if ((visibleRect.center - anchor).distance * _currentZoom >= 8) {
+      _readingDirection = visibleRect.center - anchor;
+      _directionAnchor = visibleRect.center;
+    }
     _paintPagesCustom(
       canvas,
       cache: _imageCache,
       maxImageCacheBytes: widget.params.maxImageBytesCachedOnMemory,
-      targetRect: _visibleRect,
+      targetRect: visibleRect,
       cacheTargetRect: _getCacheExtentRect(),
       scale: _currentZoom * MediaQuery.of(context).devicePixelRatio,
       enableLowResolutionPagePreview: widget.params.behaviorControlParams.enableLowResolutionPagePreview,
@@ -1815,8 +1835,14 @@ class _PdfViewerState extends State<PdfViewer>
     final dropShadowPaint = widget.params.pageDropShadow?.toPaint()?..style = PaintingStyle.fill;
     final pageImageColorFilter = widget.params.pageImageColorFilter;
     cacheTargetRect ??= targetRect;
+    // Only the main viewer's paint is tracked for PdfViewerController.visibleRenderState; not the magnifier's.
+    final paintedVisiblePages = identical(cache, _imageCache) ? <int, _PaintedVisiblePage>{} : null;
 
     cache.visiblePageNumbers = _pageLayoutIndex!.intersecting(targetRect).map((i) => i + 1).toSet();
+    final visibleArea = cache.visiblePageNumbers.fold(0.0, (area, pageNumber) {
+      final r = _layout!.pageLayouts[pageNumber - 1].intersect(targetRect);
+      return area + max(0.0, r.width) * max(0.0, r.height);
+    });
     for (final pageNumber in cache.visiblePageNumbers) {
       final preview = cache.pagePreviewRenderings[pageNumber];
       if (preview?.priority == PdfPageRenderPriority.low) preview!.token.cancel();
@@ -1826,12 +1852,37 @@ class _PdfViewerState extends State<PdfViewer>
         cache.pageImagePartialRenderingRequests.remove(pageNumber)?.cancel();
       }
     }
-    for (final entry in [...cache.pageImages.entries, ...cache.pageImagesPartial.entries]) {
-      entry.value.budgetEntry?.touch(isPinned: cache.visiblePageNumbers.contains(entry.key));
-    }
-
     final pageIndices = _pageLayoutIndex!.intersecting(cacheTargetRect);
     final retainedPages = pageIndices.map((i) => i + 1).toSet();
+    bool isAhead(Rect rect) {
+      final offset = rect.center - targetRect.center;
+      return offset.dx * _readingDirection.dx + offset.dy * _readingDirection.dy > 0;
+    }
+
+    // Visible pages first, then those ahead of the reader, then the nearest.
+    int byPriority(Rect a, Rect b) {
+      final aVisible = a.overlaps(targetRect);
+      if (aVisible != b.overlaps(targetRect)) return aVisible ? -1 : 1;
+      final aAhead = isAhead(a);
+      if (aAhead != isAhead(b)) return aAhead ? -1 : 1;
+      return _distanceToRect(a, targetRect).compareTo(_distanceToRect(b, targetRect));
+    }
+
+    // Touched least important first, so that the budget evicts the farthest needed image first.
+    // Unpinning can trim the budget, whose evictions remove entries from these maps.
+    final images = cache.pageImages.entries.toList()
+      ..sort((a, b) => byPriority(_layout!.pageLayouts[b.key - 1], _layout!.pageLayouts[a.key - 1]));
+    for (final entry in images) {
+      entry.value.budgetEntry?.touch(
+        isPinned: cache.visiblePageNumbers.contains(entry.key),
+        isNeeded: retainedPages.contains(entry.key),
+      );
+    }
+    // Partials are requested only for visible pages, so an offscreen one is never needed again.
+    for (final entry in cache.pageImagesPartial.entries.toList()) {
+      final isVisible = cache.visiblePageNumbers.contains(entry.key);
+      entry.value.budgetEntry?.touch(isPinned: isVisible, isNeeded: isVisible);
+    }
     for (final pageNumber in cache.pendingPageNumbers.toList()) {
       if (!retainedPages.contains(pageNumber)) cache.cancelPendingRenderings(pageNumber);
     }
@@ -1841,10 +1892,8 @@ class _PdfViewerState extends State<PdfViewer>
       final page = _document!.pages[i];
       firstInExtent ??= page.pageNumber;
       lastInExtent = page.pageNumber;
-      // A page that has never been measured cannot render -- PdfPage.render
-      // returns null while isLoaded is false -- so collect it and measure it
-      // after this paint. Only reachable when loadPageDimensionsOnDemand is on;
-      // otherwise every page was measured at open time.
+      // Measure visible pages whose dimensions are still estimates. Some
+      // backends can render them before measurement, using those estimates.
       if (!page.isLoaded) {
         unmeasuredPageList.add(page.pageNumber);
       }
@@ -1861,11 +1910,18 @@ class _PdfViewerState extends State<PdfViewer>
             return estimatedScale;
           };
 
+      final previewScale = getPageRenderingScale(
+        context,
+        page,
+        _controller!,
+        _sizeDelegate!.onePassRenderingScaleThreshold,
+      );
       final previewScaleLimit = _boundedRenderingScale(
-        getPageRenderingScale(context, page, _controller!, _sizeDelegate!.onePassRenderingScaleThreshold),
+        previewScale,
         page.width,
         page.height,
-        visiblePageCount: cache.visiblePageNumbers.length,
+        // Previews are not cropped, so every visible page charges its whole area.
+        sharedArea: page.width * page.height * cache.visiblePageNumbers.length,
       );
 
       if (dropShadowPaint != null) {
@@ -1904,25 +1960,49 @@ class _PdfViewerState extends State<PdfViewer>
         );
       }
 
-      if (enableLowResolutionPagePreview &&
-          (previewImage == null || previewImage.isDirty || previewImage.scale != previewScaleLimit)) {
-        previewRequests.add((page: page, scale: previewScaleLimit, rect: rect));
-      }
-
       final pageScale = page.width > 0 && page.height > 0
           ? scale * max(rect.width / page.width, rect.height / page.height)
           : 0.0;
-      if (!enableLowResolutionPagePreview || pageScale > previewScaleLimit) {
+      // A preview is kept while it is at least as sharp as the screen needs, or was sharpened while fewer pages
+      // were visible; a smaller one that fitted the budget is not re-rendered just to reach the wanted scale.
+      final previewImageScale = previewImage?.scale ?? 0;
+      final shownPreviewScale =
+          (previewImageScale > previewScaleLimit || previewImageScale >= pageScale) &&
+              previewImageScale <=
+                  _boundedRenderingScale(previewScale, page.width, page.height, sharedArea: page.width * page.height)
+          ? previewImageScale
+          : previewScaleLimit;
+      final needsPreview =
+          enableLowResolutionPagePreview &&
+          (previewImage == null || previewImage.isDirty || previewImage.scale != shownPreviewScale);
+      if (needsPreview) {
+        previewRequests.add((page: page, scale: previewScaleLimit, rect: rect));
+      }
+      _PartialImageRequestStatus? partialRequest;
+      if (!enableLowResolutionPagePreview || pageScale > shownPreviewScale) {
         // `scale` (not `pageScale`) converts document units to physical pixels.
         // `pageScale` additionally carries the layout-to-page-size ratio, which
         // `_createRealSizePartialImage` would apply a second time via
         // `pageRect.width * scale` -- under-rendering a custom `layoutPages`
         // that does not lay pages out at their natural size.
-        _requestRealSizePartialImage(cache, page, scale, targetRect);
+        partialRequest = _requestRealSizePartialImage(cache, page, scale, targetRect, visibleArea);
       }
 
-      if ((!enableLowResolutionPagePreview || pageScale > previewScaleLimit) && partial != null) {
+      if ((!enableLowResolutionPagePreview || pageScale > shownPreviewScale) && partial != null) {
         partial.draw(canvas, filterQuality, pageImageColorFilter);
+      }
+
+      if (paintedVisiblePages != null && cache.visiblePageNumbers.contains(page.pageNumber)) {
+        paintedVisiblePages[page.pageNumber] = _describePaintedVisiblePage(
+          page: page,
+          rect: rect,
+          previewScale: needsPreview ? previewScaleLimit : shownPreviewScale,
+          enableLowResolutionPagePreview: enableLowResolutionPagePreview,
+          needsPreview: needsPreview,
+          partialRequest: partialRequest,
+          previewImage: previewImage,
+          partialImage: partial,
+        );
       }
 
       // Guarded on the selection flag. Without this, paint loads structured text
@@ -1957,20 +2037,17 @@ class _PdfViewerState extends State<PdfViewer>
     }
 
     // The preview lock serves requests in call order, and the loop above walks pages by index -- so the page above
-    // the viewport used to render before the one on screen. Ask for the visible pages first.
-    previewRequests.sort((a, b) {
-      final aVisible = a.rect.overlaps(targetRect);
-      final bVisible = b.rect.overlaps(targetRect);
-      if (aVisible != bVisible) return aVisible ? -1 : 1;
-      return _distanceToRect(a.rect, targetRect).compareTo(_distanceToRect(b.rect, targetRect));
-    });
+    // the viewport used to render before the one on screen. Ask in order of priority.
+    previewRequests.sort((a, b) => byPriority(a.rect, b.rect));
     if (previewRequests.any((request) => cache.visiblePageNumbers.contains(request.page.pageNumber))) {
       for (final pageNumber in cache.pendingPageNumbers.toList()) {
         if (!cache.visiblePageNumbers.contains(pageNumber)) cache.cancelPendingRenderings(pageNumber);
       }
     }
+    // Once a request waits for pageImageCachingDelay, later offscreen ones wait too, so they keep their order.
+    var deferred = false;
     for (final request in previewRequests) {
-      _requestPagePreviewImageCached(cache, request.page, request.scale);
+      deferred = _requestPagePreviewImageCached(cache, request.page, request.scale, defer: deferred) || deferred;
     }
 
     // Once per paint, after the loop: inside it the list was still growing and the cache was trimmed once per page.
@@ -2006,10 +2083,137 @@ class _PdfViewerState extends State<PdfViewer>
     if (widget.params.behaviorControlParams.loadPageDimensionsOnDemand && unmeasuredPageList.isNotEmpty) {
       _ensureVisiblePagesMeasured(unmeasuredPageList);
     }
+
+    if (paintedVisiblePages != null) {
+      _paintedVisiblePages = _PaintedVisiblePages(_documentGeneration, targetRect, paintedVisiblePages);
+      _controller?._visibleRenderState.update();
+    }
+  }
+
+  /// What the latest paint of [_imageCache] drew for the pages intersecting the viewport.
+  _PaintedVisiblePages? _paintedVisiblePages;
+
+  /// The [PdfDocumentRef.key] that [_document] was loaded for.
+  ///
+  /// After [PdfViewer.documentRef] changes, the previous document stays attached until the new one is resolved
+  /// asynchronously; it must not be reported as ready meanwhile.
+  Object? _documentRefKey;
+
+  /// Describes what [_paintPagesCustom] painted for a visible [page] and whether it is final.
+  ///
+  /// An image is final when the paint that drew it decided not to request a replacement, so this follows the
+  /// viewer's own rendering decisions rather than duplicating them.
+  _PaintedVisiblePage _describePaintedVisiblePage({
+    required PdfPage page,
+    required Rect rect,
+    required double previewScale,
+    required bool enableLowResolutionPagePreview,
+    required bool needsPreview,
+    required _PartialImageRequestStatus? partialRequest,
+    required _PdfImageWithScale? previewImage,
+    required _PdfImageWithScaleAndRect? partialImage,
+  }) {
+    if (!page.isLoaded) return _PaintedVisiblePage(rect: rect, kind: _VisiblePageImageKind.unmeasured);
+    if (partialRequest != null) {
+      return _PaintedVisiblePage(
+        rect: rect,
+        kind: _VisiblePageImageKind.partial,
+        image: partialRequest.isCurrent ? partialImage : null,
+        scale: partialRequest.scale,
+        partialRect: partialRequest.rect,
+      );
+    }
+    // Otherwise only the preview, if enabled, is painted: the page is at or below the preview scale, or too thin a
+    // sliver of it is visible for a partial image.
+    if (!enableLowResolutionPagePreview) return _PaintedVisiblePage(rect: rect, kind: _VisiblePageImageKind.none);
+    // Same size check as _requestPagePreviewImageCached, which renders nothing below a pixel.
+    if (page.width * previewScale < 1 || page.height * previewScale < 1) {
+      return _PaintedVisiblePage(rect: rect, kind: _VisiblePageImageKind.none);
+    }
+    return _PaintedVisiblePage(
+      rect: rect,
+      kind: _VisiblePageImageKind.preview,
+      image: needsPreview ? null : previewImage,
+      scale: previewScale,
+    );
+  }
+
+  /// Evaluates [PdfViewerController.visibleRenderState] from the latest paint and the current view and cache.
+  ///
+  /// A visible page is complete when the latest paint drew an image for it without requesting a replacement, and that
+  /// image is still cached and not dirty. Comparing the painted viewport and page rectangles with the current ones
+  /// catches scrolling, zooming, resizing, and relayout that have not been painted yet.
+  PdfVisibleRenderState _evaluateVisibleRenderState() {
+    final document = _document;
+    if (!mounted || document == null) return PdfVisibleRenderState.detached;
+    if (!widget.params.isVisible) return PdfVisibleRenderState.hidden;
+    if (widget.documentRef.key != _documentRefKey) return PdfVisibleRenderState.pending;
+    final layout = _layout;
+    final pageLayoutIndex = _pageLayoutIndex;
+    if (!_initialized || layout == null || pageLayoutIndex == null || _viewSize == null) {
+      return PdfVisibleRenderState.pending;
+    }
+    final targetRect = _visibleRect;
+    final visiblePageIndices = pageLayoutIndex.intersecting(targetRect);
+    if (visiblePageIndices.isEmpty) return PdfVisibleRenderState.noVisiblePages;
+
+    final painted = _paintedVisiblePages;
+    if (painted == null ||
+        painted.documentGeneration != _documentGeneration ||
+        painted.targetRect != targetRect ||
+        painted.pages.length != visiblePageIndices.length) {
+      return PdfVisibleRenderState.pending;
+    }
+
+    final cache = _imageCache;
+    var failed = false;
+    for (final index in visiblePageIndices) {
+      final pageNumber = index + 1;
+      final entry = painted.pages[pageNumber];
+      if (entry == null || entry.rect != layout.pageLayouts[index]) return PdfVisibleRenderState.pending;
+      switch (entry.kind) {
+        case _VisiblePageImageKind.none:
+          continue;
+        // A failure is reported even while the viewer retries (it may retry on every repaint); the failure record is
+        // only cleared when an image is produced or the page or cache changes.
+        case _VisiblePageImageKind.unmeasured:
+          if (!document.pages[index].isLoaded && (_measurementFailures[pageNumber] ?? 0) > 0) {
+            failed = true;
+            continue;
+          }
+          return PdfVisibleRenderState.pending;
+        case _VisiblePageImageKind.preview:
+          final image = entry.image;
+          if (image != null && identical(cache.pageImages[pageNumber], image) && !image.isDirty) continue;
+          if (cache.previewRenderFailures[pageNumber] == entry.scale) {
+            failed = true;
+            continue;
+          }
+          return PdfVisibleRenderState.pending;
+        case _VisiblePageImageKind.partial:
+          final image = entry.image;
+          if (image != null && identical(cache.pageImagesPartial[pageNumber], image) && !image.isDirty) continue;
+          final failure = cache.partialRenderFailures[pageNumber];
+          if (failure != null && failure.rect == entry.partialRect && failure.scale == entry.scale) {
+            failed = true;
+            continue;
+          }
+          return PdfVisibleRenderState.pending;
+      }
+    }
+    return failed ? PdfVisibleRenderState.failed : PdfVisibleRenderState.ready;
   }
 
   /// Last logged extent/unmeasured/white tuple, to keep the trace to changes.
   String? _lastExtentSignature;
+
+  /// Visible work may exceed the budget unless other visible work already does; a prefetch never holds it back.
+  bool get _onlyPrefetchesPending => _imageBudget.pendingBytes <= _imageBudget.speculativePendingBytes;
+
+  /// The last movement of the viewport, so that prefetch serves the pages ahead of the reader first.
+  Offset _readingDirection = Offset.zero;
+  Offset? _directionAnchor;
+  double? _directionZoom;
 
   /// Pages whose real dimensions have been requested but not yet applied.
   final _pagesBeingMeasured = <int>{};
@@ -2097,6 +2301,8 @@ class _PdfViewerState extends State<PdfViewer>
         }
       } finally {
         _pagesBeingMeasured.removeAll(toMeasure);
+        // A failure does not necessarily repaint, so report it here.
+        if (mounted && _document == document) _controller?._visibleRenderState.update();
       }
     });
   }
@@ -2211,6 +2417,8 @@ class _PdfViewerState extends State<PdfViewer>
   void _invalidate({bool relayout = false}) {
     if (relayout) _layoutDirty = true;
     _updateStream.add(_txController.value);
+    // Leave the ready state as soon as the view or cache changes, without waiting for the repaint.
+    _controller?._visibleRenderState.update();
   }
 
   void _releaseCachedImages({required bool keepVisible}) {
@@ -2242,12 +2450,14 @@ class _PdfViewerState extends State<PdfViewer>
     return dx * dx + dy * dy;
   }
 
-  double _boundedRenderingScale(double scale, double width, double height, {int visiblePageCount = 1}) {
+  /// Scales the images that share the rendering limit alike so that their pixels fit it together.
+  /// [sharedArea] is their combined area, in the units of [width] and [height].
+  double _boundedRenderingScale(double scale, double width, double height, {required double sharedArea}) {
     if (widget.params.imageCacheBudget == null) return scale;
     if (!scale.isFinite || scale <= 0 || !width.isFinite || !height.isFinite || width <= 0 || height <= 0) return 0;
     final maximumBytes = min(_imageBudget.maximumBytes, widget.params.maxImageBytesCachedOnMemory);
-    final maxPixels = max(1, maximumBytes ~/ (12 * max(1, visiblePageCount)));
-    return max(1 / min(width, height), min(scale, sqrt(maxPixels / (width * height))));
+    final maxPixels = max(1, maximumBytes ~/ 12);
+    return max(1 / min(width, height), min(scale, sqrt(maxPixels / max(width * height, sharedArea))));
   }
 
   bool _retainImage(
@@ -2260,6 +2470,7 @@ class _PdfViewerState extends State<PdfViewer>
     final entry = reservation.commit(
       retainedBytes: image.width * image.height * 8,
       isPinned: cache.visiblePageNumbers.contains(pageNumber),
+      isNeeded: true,
       onEvict: () {
         if (partial) {
           if (identical(cache.pageImagesPartial[pageNumber], image)) cache.pageImagesPartial.remove(pageNumber);
@@ -2277,24 +2488,27 @@ class _PdfViewerState extends State<PdfViewer>
     return true;
   }
 
-  Future<void> _requestPagePreviewImageCached(_PdfPageImageCache cache, PdfPage page, double scale) async {
-    if (!widget.params.isVisible) return;
+  /// Returns whether the request waits for pageImageCachingDelay.
+  bool _requestPagePreviewImageCached(_PdfPageImageCache cache, PdfPage page, double scale, {bool defer = false}) {
+    if (!widget.params.isVisible) return false;
     final width = page.width * scale;
     final height = page.height * scale;
-    if (width < 1 || height < 1) return;
+    if (width < 1 || height < 1) return false;
 
     // if this is the first time to render the page, render it immediately
-    if (!cache.pageImages.containsKey(page.pageNumber)) {
+    if (!cache.pageImages.containsKey(page.pageNumber) &&
+        (!defer || cache.visiblePageNumbers.contains(page.pageNumber))) {
       _cachePagePreviewImage(cache, page, width, height, scale);
-      return;
+      return false;
     }
 
     cache.pageImageRenderingTimers[page.pageNumber]?.cancel();
-    if (!mounted || !widget.params.isVisible) return;
+    if (!mounted || !widget.params.isVisible) return false;
     cache.pageImageRenderingTimers[page.pageNumber] = Timer(
       widget.params.behaviorControlParams.pageImageCachingDelay,
       () => _cachePagePreviewImage(cache, page, width, height, scale),
     );
+    return true;
   }
 
   Future<void> _cachePagePreviewImage(
@@ -2331,14 +2545,29 @@ class _PdfViewerState extends State<PdfViewer>
         }
         final prev = cache.pageImages[page.pageNumber];
         if (prev != null && !prev.isDirty && prev.scale == scale) return;
-        final bytes = (max(1, width.toInt()) * max(1, height.toInt()) * 12).toInt();
-        // Prefetch must not evict images that the next paint would request again.
-        if (priority == PdfPageRenderPriority.low && _imageBudget.estimatedBytes + bytes > _imageBudget.maximumBytes) {
-          return;
+        var bytes = (max(1, width.toInt()) * max(1, height.toInt()) * 12).toInt();
+        if (priority == PdfPageRenderPriority.low) {
+          // Prefetch must not evict images that the next paint would request again, so it shrinks to fit.
+          // It waits while other work is in flight, which repaints when it releases its room.
+          // The page's own preview counts as room, since the new one replaces it.
+          final reservable = _imageBudget.reservableBytes(keepNeeded: true) + (prev?.budgetEntry?.bytes ?? 0);
+          // Measured on the unrounded size, so that the rounded-down result always fits.
+          final fit = bytes <= reservable ? 1.0 : sqrt(reservable / (width * height * 12));
+          if (fit < 1 && (fit < 0.5 || _imageBudget.pendingBytes > 0)) return;
+          // A shrunk preview is replaced only by a clearly sharper one, so that freed room cannot cause churn.
+          if (fit < 1 && prev != null && !prev.isDirty && prev.scale <= scale && scale * fit < prev.scale * 1.1) return;
+          if (fit < 1) {
+            width *= fit;
+            height *= fit;
+            scale *= fit;
+            bytes = (max(1, width.toInt()) * max(1, height.toInt()) * 12).toInt();
+          }
+          if (bytes > _imageBudget.reservableBytes(keepNeeded: true)) prev?.budgetEntry?.touch(isNeeded: false);
         }
         final reservation = _imageBudget.tryReserve(
           bytes,
-          allowOverBudget: cache.visiblePageNumbers.contains(page.pageNumber) && _imageBudget.pendingBytes == 0,
+          allowOverBudget: cache.visiblePageNumbers.contains(page.pageNumber) && _onlyPrefetchesPending,
+          keepNeeded: priority == PdfPageRenderPriority.low,
         );
         if (reservation == null) return;
         ui.Image? rendered;
@@ -2353,6 +2582,7 @@ class _PdfViewerState extends State<PdfViewer>
             priority: priority,
           );
           if (rendered == null || !mounted || !widget.params.isVisible || cancellationToken.isCanceled) {
+            if (rendered == null && !cancellationToken.isCanceled) cache.previewRenderFailures[page.pageNumber] = scale;
             if (sw != null) {
               // A null here is a silent failure that leaves the page white --
               // pdfium declined to produce a bitmap and nothing upstream records
@@ -2378,6 +2608,7 @@ class _PdfViewerState extends State<PdfViewer>
           if (!_retainImage(cache, page.pageNumber, newImage, reservation)) return;
           cache.pageImages[page.pageNumber]?.dispose();
           cache.pageImages[page.pageNumber] = newImage;
+          cache.previewRenderFailures.remove(page.pageNumber);
           if (identical(cache, _imageCache)) _completeInitialPageImageWaiterIfReady();
           if (sw != null) {
             final fetched = Pdfrx.debugBytesFetched - bytesAtRequest;
@@ -2389,6 +2620,7 @@ class _PdfViewerState extends State<PdfViewer>
           }
           _invalidate();
         } catch (e) {
+          if (!cancellationToken.isCanceled) cache.previewRenderFailures[page.pageNumber] = scale;
           if (sw != null) {
             pdfrxLazyLog('#$_viewerInstanceId RENDER p${page.pageNumber} THREW after ${sw.elapsedMilliseconds}ms: $e');
           }
@@ -2405,25 +2637,39 @@ class _PdfViewerState extends State<PdfViewer>
       // so the current extent, rather than the stale one, decides whether the
       // page needs a new preview.
       if (mounted && cancellationToken.isCanceled) _invalidate();
+      // A failure does not necessarily repaint, so report it here.
+      if (mounted && identical(cache, _imageCache)) _controller?._visibleRenderState.update();
     }
   }
 
-  Future<void> _requestRealSizePartialImage(
+  /// Requests the partial image of the visible part of [page] unless the cached one already matches.
+  ///
+  /// Returns the wanted rectangle and scale, or null when no partial image can be requested.
+  _PartialImageRequestStatus? _requestRealSizePartialImage(
     _PdfPageImageCache cache,
     PdfPage page,
     double scale,
     Rect targetRect,
-  ) async {
-    if (!mounted || !widget.params.isVisible) return;
+    double visibleArea,
+  ) {
+    if (!mounted || !widget.params.isVisible) return null;
     final pageRect = _layout!.pageLayouts[page.pageNumber - 1];
     final rect = pageRect.intersect(targetRect);
-    scale = _boundedRenderingScale(scale, rect.width, rect.height, visiblePageCount: cache.visiblePageNumbers.length);
+    scale = _boundedRenderingScale(scale, rect.width, rect.height, sharedArea: visibleArea);
     final prev = cache.pageImagesPartial[page.pageNumber];
-    if (prev != null && !prev.isDirty && prev.rect == rect && prev.scale == scale) return;
-    if (rect.width < 1 || rect.height < 1) return;
+    if (prev != null && !prev.isDirty && prev.rect == rect && prev.scale == scale) {
+      return (rect: rect, scale: scale, isCurrent: true);
+    }
+    if (rect.width < 1 || rect.height < 1) return null;
+    // A sliver narrower than a pixel produces no image (see _createRealSizePartialImage); it is still requested as
+    // before, but no partial image is wanted for it.
+    final pixels = scaleRectForRendering(rect.translate(-pageRect.left, -pageRect.top), scale);
+    final status = pixels != null && (pixels.width < 1 || pixels.height < 1)
+        ? null
+        : (rect: rect, scale: scale, isCurrent: false);
     final pending = cache.pageImagePartialRenderingRequests[page.pageNumber];
     if (pending != null && pending.rect == rect && pending.scale == scale && !pending.cancellationToken.isCanceled) {
-      return;
+      return status;
     }
 
     cache.pageImagePartialRenderingRequests[page.pageNumber]?.cancel();
@@ -2439,6 +2685,7 @@ class _PdfViewerState extends State<PdfViewer>
           if (newImage != null && cache.pageImagePartialRenderingRequests[page.pageNumber] == request) {
             cache.pageImagesPartial.remove(page.pageNumber)?.dispose();
             cache.pageImagesPartial[page.pageNumber] = newImage;
+            cache.partialRenderFailures.remove(page.pageNumber);
             _invalidate();
           } else {
             newImage?.dispose();
@@ -2446,6 +2693,8 @@ class _PdfViewerState extends State<PdfViewer>
         } finally {
           if (cache.pageImagePartialRenderingRequests[page.pageNumber] == request) {
             cache.pageImagePartialRenderingRequests.remove(page.pageNumber);
+            // A failure does not necessarily repaint, so report it here.
+            if (mounted && identical(cache, _imageCache)) _controller?._visibleRenderState.update();
           }
         }
       }),
@@ -2454,6 +2703,7 @@ class _PdfViewerState extends State<PdfViewer>
       scale,
     );
     cache.pageImagePartialRenderingRequests[page.pageNumber] = request;
+    return status;
   }
 
   Future<_PdfImageWithScaleAndRect?> _createRealSizePartialImage(
@@ -2464,13 +2714,19 @@ class _PdfViewerState extends State<PdfViewer>
     PdfPageRenderCancellationToken cancellationToken,
   ) async {
     if (!mounted || cancellationToken.isCanceled) return null;
+    // Recorded for PdfViewerController.visibleRenderState when no image can be produced for this request.
+    void recordFailure() => cache.partialRenderFailures[page.pageNumber] = (rect: rect, scale: scale);
     final pageRect = _layout!.pageLayouts[page.pageNumber - 1];
     final inPageRect = rect.translate(-pageRect.left, -pageRect.top);
     final scaledRect = scaleRectForRendering(inPageRect, scale);
     final fullWidth = pageRect.width * scale;
     final fullHeight = pageRect.height * scale;
-    if (scaledRect == null || !fullWidth.isFinite || !fullHeight.isFinite) return null;
+    if (scaledRect == null || !fullWidth.isFinite || !fullHeight.isFinite) {
+      recordFailure();
+      return null;
+    }
     final (:x, :y, :width, :height) = scaledRect;
+    // Nothing to render, which is not a failure; see _requestRealSizePartialImage.
     if (width < 1 || height < 1) return null;
 
     var flags = 0;
@@ -2479,7 +2735,7 @@ class _PdfViewerState extends State<PdfViewer>
     ui.Image? rendered;
     final reservation = _imageBudget.tryReserve(
       width * height * 12,
-      allowOverBudget: cache.visiblePageNumbers.contains(page.pageNumber) && _imageBudget.pendingBytes == 0,
+      allowOverBudget: cache.visiblePageNumbers.contains(page.pageNumber) && _onlyPrefetchesPending,
     );
     if (reservation == null) return null;
     try {
@@ -2496,7 +2752,10 @@ class _PdfViewerState extends State<PdfViewer>
         cancellationToken: cancellationToken,
         priority: PdfPageRenderPriority.high,
       );
-      if (rendered == null || !mounted || cancellationToken.isCanceled) return null;
+      if (rendered == null || !mounted || cancellationToken.isCanceled) {
+        if (rendered == null && !cancellationToken.isCanceled) recordFailure();
+        return null;
+      }
       final image = _PdfImageWithScaleAndRect(rendered, scale, rect, x, y, pageGeometry: _pageGeometryOf(page));
       rendered = null;
       if (!mounted || cancellationToken.isCanceled) {
@@ -2506,6 +2765,7 @@ class _PdfViewerState extends State<PdfViewer>
       if (!_retainImage(cache, page.pageNumber, image, reservation, partial: true)) return null;
       return image;
     } catch (e) {
+      if (!cancellationToken.isCanceled) recordFailure();
       return null; // ignore error
     } finally {
       rendered?.dispose();
@@ -4442,6 +4702,18 @@ class _PdfPageImageCache {
   final pagePreviewRenderings = <int, ({PdfPageRenderCancellationToken token, PdfPageRenderPriority priority})>{};
   final pageImagePartialRenderingRequests = <int, _PdfPartialImageRenderingRequest>{};
 
+  /// Scale of the latest preview render that produced no image, by page number; see
+  /// [_PdfViewerState._evaluateVisibleRenderState].
+  final previewRenderFailures = <int, double>{};
+
+  /// Rectangle and scale of the latest partial render that produced no image, by page number.
+  final partialRenderFailures = <int, ({Rect rect, double scale})>{};
+
+  void clearRenderFailures(int pageNumber) {
+    previewRenderFailures.remove(pageNumber);
+    partialRenderFailures.remove(pageNumber);
+  }
+
   Iterable<int> get pendingPageNumbers => {
     ...pageImageRenderingTimers.keys,
     ...cancellationTokens.keys,
@@ -4495,6 +4767,8 @@ class _PdfPageImageCache {
       image.dispose();
     }
     pageImagesPartial.clear();
+    previewRenderFailures.clear();
+    partialRenderFailures.clear();
   }
 
   /// Disposes every image except those of [keep], cancelling their pending renders; see
@@ -4513,6 +4787,8 @@ class _PdfPageImageCache {
       pageImages.remove(pageNumber)?.dispose();
       pageImagesPartial.remove(pageNumber)?.dispose();
     }
+    previewRenderFailures.removeWhere((pageNumber, _) => !keep.contains(pageNumber));
+    partialRenderFailures.removeWhere((pageNumber, _) => !keep.contains(pageNumber));
   }
 
   void cancelPendingPartialRendering(int pageNumber) {
@@ -4557,6 +4833,7 @@ class _PdfPageImageCache {
     if (imagePartial != null && !stillValid(imagePartial)) {
       imagePartial.isDirty = true;
     }
+    clearRenderFailures(pageNumber);
   }
 
   void removeCacheImagesForPage(int pageNumber) {
@@ -4565,6 +4842,7 @@ class _PdfPageImageCache {
       removed.dispose();
     }
     pageImagesPartial.remove(pageNumber)?.dispose();
+    clearRenderFailures(pageNumber);
   }
 
   void removeCacheImagesIfCacheBytesExceedsLimit(
@@ -4607,6 +4885,59 @@ class _PdfPartialImageRenderingRequest {
     timer.cancel();
     cancellationToken.cancel();
   }
+}
+
+/// Which image the viewer settles on for a page intersecting the viewport.
+enum _VisiblePageImageKind {
+  /// Nothing can be rendered; e.g. the page is too small to produce a single pixel.
+  none,
+
+  /// The page has not been measured yet, so any image of it would be replaced.
+  unmeasured,
+
+  /// The page preview image ([_PdfPageImageCache.pageImages]).
+  preview,
+
+  /// The partial image of the visible part of the page ([_PdfPageImageCache.pageImagesPartial]).
+  partial,
+}
+
+/// What [_PdfViewerState._paintPagesCustom] painted for a page intersecting the viewport.
+class _PaintedVisiblePage {
+  _PaintedVisiblePage({
+    required this.rect,
+    required this.kind,
+    this.image,
+    this.scale = 0,
+    this.partialRect = Rect.zero,
+  });
+
+  /// The page rectangle in the document layout.
+  final Rect rect;
+
+  /// Which image the viewer settles on for the page.
+  final _VisiblePageImageKind kind;
+
+  /// The image of [kind] that was painted, or null if none was painted or the paint requested a replacement.
+  final _PdfImageWithScale? image;
+
+  /// The scale requested for an image of [kind] ([_VisiblePageImageKind.preview] or
+  /// [_VisiblePageImageKind.partial]); matched against render failures.
+  final double scale;
+
+  /// The rectangle requested for a partial image; matched against render failures.
+  final Rect partialRect;
+}
+
+/// The partial image [_PdfViewerState._requestRealSizePartialImage] wants for a page, and whether the cached one is it.
+typedef _PartialImageRequestStatus = ({Rect rect, double scale, bool isCurrent});
+
+/// What the latest paint of the main page cache drew; see [_PdfViewerState._evaluateVisibleRenderState].
+class _PaintedVisiblePages {
+  _PaintedVisiblePages(this.documentGeneration, this.targetRect, this.pages);
+  final int documentGeneration;
+  final Rect targetRect;
+  final Map<int, _PaintedVisiblePage> pages;
 }
 
 /// Identifies the page geometry a cached bitmap was rendered from.
@@ -4911,6 +5242,78 @@ class PdfPageHitTestResult {
   int get hashCode => page.hashCode ^ offset.hashCode;
 }
 
+/// Whether the PDF page images that a [PdfViewer] paints in its viewport are complete.
+///
+/// See [PdfViewerController.visibleRenderState] for what the states cover and when they change.
+enum PdfVisibleRenderState {
+  /// The controller is not attached to a [PdfViewer] showing a document.
+  ///
+  /// This is the state while the document is loading, after it failed to load (see
+  /// [PdfViewerParams.onDocumentLoadFinished]), and after the viewer is disposed.
+  detached,
+
+  /// The viewer paints no pages because [PdfViewerParams.isVisible] is false.
+  hidden,
+
+  /// No page intersects the viewport, e.g. when only the margins around the pages are visible.
+  noVisiblePages,
+
+  /// At least one visible page is still being laid out, measured, or rendered, or its final image has not been
+  /// painted yet.
+  pending,
+
+  /// No visible page is pending, but the latest attempt to render at least one of them failed.
+  ///
+  /// This happens when rendering a visible page for the current view returns no image or throws, or when the size of
+  /// a page cannot be loaded. The state is not final: the viewer retries when it repaints the page, and the state
+  /// becomes [ready] if a retry succeeds.
+  failed,
+
+  /// Every page intersecting the viewport has been painted with its final image for the current view.
+  ready,
+}
+
+/// Backs [PdfViewerController.visibleRenderState].
+///
+/// The state is only tracked while someone listens. Without listeners, [value] evaluates the viewer on demand.
+class _PdfVisibleRenderStateNotifier extends ChangeNotifier implements ValueListenable<PdfVisibleRenderState> {
+  _PdfVisibleRenderStateNotifier(this._evaluate);
+
+  final PdfVisibleRenderState Function() _evaluate;
+  PdfVisibleRenderState _value = PdfVisibleRenderState.detached;
+  bool _updateScheduled = false;
+
+  @override
+  PdfVisibleRenderState get value => hasListeners ? _value : _evaluate();
+
+  @override
+  void addListener(VoidCallback listener) {
+    if (!hasListeners) _value = _evaluate();
+    super.addListener(listener);
+  }
+
+  /// Re-evaluates the state and notifies listeners if it changed.
+  ///
+  /// Listeners may call `setState`, so while a frame is being built, laid out, or painted the update is deferred to
+  /// the end of that frame.
+  void update() {
+    if (!hasListeners) return;
+    if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.persistentCallbacks) {
+      if (_updateScheduled) return;
+      _updateScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        _updateScheduled = false;
+        update();
+      }, debugLabel: 'PdfViewerController.visibleRenderState');
+      return;
+    }
+    final value = _evaluate();
+    if (value == _value) return;
+    _value = value;
+    notifyListeners();
+  }
+}
+
 /// Controls associated [PdfViewer].
 ///
 /// It's always your option to extend (inherit) the class to customize the [PdfViewer] behavior.
@@ -4921,12 +5324,69 @@ class PdfPageHitTestResult {
 class PdfViewerController extends ValueListenable<Matrix4> {
   _PdfViewerState? __state;
   final _listeners = <VoidCallback>[];
+  late final _visibleRenderState = _PdfVisibleRenderStateNotifier(
+    () => __state?._evaluateVisibleRenderState() ?? PdfVisibleRenderState.detached,
+  );
 
   void _attach(_PdfViewerState? state) {
     __state?._txController.removeListener(_notifyListeners);
     __state = state;
     __state?._txController.addListener(_notifyListeners);
+    _visibleRenderState.update();
   }
+
+  /// Whether the PDF page images painted in the viewport are complete for the current view.
+  ///
+  /// The state is [PdfVisibleRenderState.ready] only after the viewer has painted, for every page intersecting the
+  /// viewport, the final page image it produces for the current document, layout, viewport size, scroll position,
+  /// and zoom: the page preview image when [PdfViewerBehaviorControlParams.enableLowResolutionPagePreview] is enabled
+  /// and the page is shown at or below its preview rendering scale, or otherwise the high-resolution image of the
+  /// visible part of the page. Low-resolution previews shown while the high-resolution image is still being
+  /// rendered, blank placeholders, outdated images, and images that are rendered but not yet painted are not ready.
+  /// In other words, ready means the viewer has painted everything it will render for the current view; a page or a
+  /// strip of a page too small to produce a single pixel needs no image, and a strip too thin for a high-resolution
+  /// image keeps showing the preview.
+  ///
+  /// Any change that alters what should be painted, such as scrolling, zooming, resizing, going to another page,
+  /// replacing the document, or releasing the visible pages' images (`releaseCachedImages(keepVisible: false)`),
+  /// makes the state leave [PdfVisibleRenderState.ready]. Images that finish rendering for a view that is no longer
+  /// current never make the state ready. A failure is remembered for the page and requested image, so returning to a
+  /// view whose rendering failed reports [PdfVisibleRenderState.failed] again until a retry succeeds. The state always
+  /// describes the current view, so an intermediate frame of an animated scroll or zoom can be ready; wait for
+  /// navigation methods such as [goToPage] to complete before waiting for the state.
+  ///
+  /// The state covers only the page images. It does not cover [PdfViewerParams.pageOverlaysBuilder],
+  /// [PdfViewerParams.viewerOverlayBuilder], [PdfViewerParams.pagePaintCallbacks], text selection, link highlights,
+  /// or the selection magnifier.
+  ///
+  /// Listeners are notified outside the build, layout, and paint phases: a change detected while a frame is being
+  /// produced, including the paint that completes the page images, is reported once that frame has been laid out and
+  /// painted. "Painted" means recorded into that frame's layer tree; the frame may not have reached the screen yet.
+  /// Listeners can therefore call `setState` or capture the viewer with `RenderRepaintBoundary.toImage`. A change
+  /// applied with `setState` (such as a new [PdfViewer.documentRef]) is reflected once the frame that applies it has
+  /// been built. The controller keeps its listeners when it is detached from a viewer or attached to another one.
+  ///
+  /// The following fragment waits until the visible pages are rendered, or until rendering settles with a failure:
+  ///
+  /// ```dart
+  /// Future<bool> waitForVisiblePages(PdfViewerController controller, {Duration timeout = const Duration(seconds: 10)}) {
+  ///   final completer = Completer<bool>();
+  ///   void check() {
+  ///     final state = controller.visibleRenderState.value;
+  ///     if (state != PdfVisibleRenderState.ready && state != PdfVisibleRenderState.failed) return;
+  ///     controller.visibleRenderState.removeListener(check);
+  ///     completer.complete(state == PdfVisibleRenderState.ready);
+  ///   }
+  ///   controller.visibleRenderState.addListener(check);
+  ///   check();
+  ///   // The viewer may never get there, e.g. when it is hidden or disposed.
+  ///   return completer.future.timeout(timeout, onTimeout: () {
+  ///     controller.visibleRenderState.removeListener(check);
+  ///     return false;
+  ///   });
+  /// }
+  /// ```
+  ValueListenable<PdfVisibleRenderState> get visibleRenderState => _visibleRenderState;
 
   void _notifyListeners() {
     for (final listener in _listeners) {

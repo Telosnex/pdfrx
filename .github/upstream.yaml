@@ -11,5 +11,5 @@ sources:
   # only once the oldest unmerged commit is a week old.
   - name: espresso3389/pdfrx
     branch: https://github.com/espresso3389/pdfrx
-    pin: b500740c3952af87502aa33dbc0bba900783f397
+    pin: 78004de9a9750fbdd994d8354622a428b02d11a1
     lag_days: 7

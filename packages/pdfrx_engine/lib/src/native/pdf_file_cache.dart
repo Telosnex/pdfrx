@@ -287,15 +287,18 @@ class PdfFileCache {
     await _saveCacheControlState();
   }
 
-  static Future<File> getCacheFilePathForUri(Uri uri) async {
+  /// Authentication-specific headers must not reuse another user's disk cache.
+  /// Header-less URLs retain their existing cache paths for compatibility.
+  static Future<File> getCacheFilePathForUri(Uri uri, {Map<String, String>? headers}) async {
     if (Pdfrx.cacheDirectoryPath == null) {
       throw StateError('Pdfrx.cacheDirectoryPath is not set. Please initialize pdfrx or set it explicitly.');
     }
-    final fnHash = sha1
-        .convert(utf8.encode(uri.toString()))
-        .bytes
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
+    final normalizedHeaders = <String, String>{};
+    headers?.forEach((name, value) => normalizedHeaders[name.toLowerCase()] = value);
+    final names = normalizedHeaders.keys.toList()..sort();
+    // HTTP header lines cannot contain CR/LF, so the joined identity is unambiguous.
+    final identity = [uri.toString(), for (final name in names) '$name: ${normalizedHeaders[name]}'].join('\n');
+    final fnHash = sha1.convert(utf8.encode(identity)).bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
     final dir1 = fnHash.substring(0, 2);
     final dir2 = fnHash.substring(2, 4);
     final body = fnHash.substring(4);
@@ -303,8 +306,8 @@ class PdfFileCache {
     return File(path.join(dir.path, '$body.pdf'));
   }
 
-  static Future<PdfFileCache> fromUri(Uri uri) async {
-    return await fromFile(await getCacheFilePathForUri(uri));
+  static Future<PdfFileCache> fromUri(Uri uri, {Map<String, String>? headers}) async {
+    return await fromFile(await getCacheFilePathForUri(uri, headers: headers));
   }
 }
 
@@ -341,7 +344,7 @@ Future<PdfDocument> pdfDocumentFromUri(
   progressCallback?.call(0);
   // Keep the cache in a non-null local variable. Some Dart backends used by Windows ARM64 builds do not
   // promote the nullable parameter reliably after `??=` once it is captured by the read/onDispose callbacks.
-  final resolvedCache = cache ?? await PdfFileCache.fromUri(uri);
+  final resolvedCache = cache ?? await PdfFileCache.fromUri(uri, headers: headers);
   final httpClientWrapper = _HttpClientWrapper(Pdfrx.createHttpClient ?? () => http.Client());
 
   try {
@@ -528,15 +531,28 @@ Future<_DownloadResult> _downloadBlock(
     await cache.invalidateCache();
   }
 
-  final contentRange = response.headers['content-range'];
-  var isFullDownload = false;
-  if (contentRange != null) {
-    final m = RegExp(r'bytes (\d+)-(\d+)/(\d+)').firstMatch(contentRange);
-    fileSize = int.parse(m!.group(3)!);
+  final isFullDownload = response.statusCode == 200;
+  if (isFullDownload) {
+    // The server does not support range request and returns the whole file, which starts at byte 0.
+    if (blockOffset != 0) {
+      throw const PdfException('Server ignored the byte-range request for a later block');
+    }
+    // IOClient decodes gzip but keeps the compressed Content-Length header.
+    // Derive the decoded size from the completed stream instead.
+    fileSize = response.headers['content-encoding']?.trim().toLowerCase() == 'gzip' ? null : response.contentLength;
   } else {
-    // The server does not support range request and returns the whole file.
-    fileSize = response.contentLength;
-    isFullDownload = true;
+    final contentRange = response.headers['content-range'];
+    final m = contentRange == null ? null : RegExp(r'^bytes (\d+)-(\d+)/(\d+)$').firstMatch(contentRange.trim());
+    if (m == null) {
+      throw PdfException('Invalid Content-Range: $contentRange');
+    }
+    fileSize = int.parse(m.group(3)!);
+    // Bytes written at the wrong offset would be served from the cache as if they were valid.
+    if (int.parse(m.group(1)!) != blockOffset ||
+        int.parse(m.group(2)!) != min(end, fileSize) - 1 ||
+        (cache.isInitialized && cache.fileSize != fileSize)) {
+      throw PdfException('Content-Range $contentRange does not match the requested bytes $blockOffset-${end - 1}');
+    }
   }
   if (!cache.isInitialized) {
     await cache.initializeWithFileSize(fileSize ?? 0, truncateExistingContent: true);
@@ -557,8 +573,8 @@ Future<_DownloadResult> _downloadBlock(
 
   if (isFullDownload) {
     if (fileSize != null) {
-      if (fileSize != cache.fileSize) {
-        throw PdfException('File size mismatch after full download: expected $fileSize, got ${cache.fileSize}');
+      if (fileSize != bytesThisRequest) {
+        throw PdfException('File size mismatch after full download: expected $fileSize, got $bytesThisRequest');
       }
     } else {
       fileSize = cachedBytesSoFar;
@@ -584,6 +600,10 @@ Future<_DownloadResult> _downloadBlock(
       if (blocksFilled > 0) {
         await cache.setCached(blockId, lastBlock: blockId + blocksFilled - 1);
       }
+      // The pending read must not consume the hole either.
+      throw PdfException(
+        'Short range response for block $blockId: expected $bytesExpected bytes, got $bytesThisRequest',
+      );
     } else {
       await cache.setCached(blockId, lastBlock: blockId + blockCount - 1);
     }

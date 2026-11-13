@@ -75,13 +75,14 @@ Future<void> _downloadPdfium({
   final output = File.fromUri(outputFile);
   if (await output.exists()) return;
 
+  final archiveName =
+      'pdfium-${target.archivePlatform}-${target.archiveArch}.tgz';
   final archiveUri = Uri.parse(
     'https://github.com/bblanchon/pdfium-binaries/releases/download/'
-    '${pdfiumRelease.replaceAll('/', '%2F')}/'
-    'pdfium-${target.archivePlatform}-${target.archiveArch}.tgz',
+    '${pdfiumRelease.replaceAll('/', '%2F')}/$archiveName',
   );
 
-  final response = await getWithRetries(archiveUri);
+  final response = await getPdfiumArchiveWithApiFallback(archiveUri);
   if (response.statusCode != 200) {
     throw Exception(
       'Failed to download PDFium: HTTP ${response.statusCode} $archiveUri',
@@ -157,7 +158,7 @@ final class _PdfiumTarget {
         archivePlatform: 'mac',
         archiveArch: arch,
         archiveLibraryPath: 'lib/libpdfium.dylib',
-        libraryFileName: 'libpdfium.dylib',
+        libraryFileName: 'libpdfium_dart.dylib',
       ),
       _ => throw UnsupportedError(
         'Unsupported PDFium platform: ${config.targetOS}',

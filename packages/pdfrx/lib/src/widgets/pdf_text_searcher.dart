@@ -16,7 +16,7 @@ import 'pdf_viewer_params.dart' show PdfViewerParams;
 /// to keep search results independent of the bounded structured-text cache.
 class PdfTextSearcher extends _PdfTextSearcherBase<PdfPageTextRange> {
   /// Creates a new instance of [PdfTextSearcher].
-  PdfTextSearcher(super.controller, {super.notificationInterval});
+  PdfTextSearcher(super.controller, {super.notificationInterval, super.onNavigateToMatch});
 
   @override
   PdfPageTextRange _createMatch(PdfPageTextRange range) => range;
@@ -37,7 +37,7 @@ class PdfTextSearcher extends _PdfTextSearcherBase<PdfPageTextRange> {
 /// Use [loadText] only when full page text or selection geometry is needed.
 class PdfTextSearchSession extends _PdfTextSearcherBase<PdfTextSearchResult> {
   /// Creates a lightweight search session with bounded context for each match.
-  PdfTextSearchSession(super.controller, {this.contextLength = 80, super.notificationInterval})
+  PdfTextSearchSession(super.controller, {this.contextLength = 80, super.notificationInterval, super.onNavigateToMatch})
     : assert(contextLength >= 0);
 
   /// Maximum context characters retained on each side of a match.
@@ -58,7 +58,11 @@ class PdfTextSearchSession extends _PdfTextSearcherBase<PdfTextSearchResult> {
 }
 
 abstract class _PdfTextSearcherBase<T> extends Listenable {
-  _PdfTextSearcherBase(this._controller, {this.notificationInterval = const Duration(milliseconds: 100)}) {
+  _PdfTextSearcherBase(
+    this._controller, {
+    this.notificationInterval = const Duration(milliseconds: 100),
+    this.onNavigateToMatch,
+  }) {
     _registerForDocumentChanges();
   }
 
@@ -71,6 +75,9 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
 
   /// Minimum interval between progress notifications, excluding first and final results.
   final Duration notificationInterval;
+
+  /// Optional match navigation, replacing ensureVisible while preserving selection state.
+  final Future<void> Function(PdfViewerController controller, T match)? onNavigateToMatch;
 
   /// The [PdfViewerController] to use.
   PdfViewerController? get controller => _controller.isReady ? _controller : null;
@@ -92,6 +99,7 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
   int? _searchingPageNumber;
   int? _totalPageCount;
   bool _isSearching = false;
+  Object? _searchError;
   StreamSubscription<PdfDocumentEvent>? _documentEventSubscription;
   PdfDocument? _observedDocument;
   final _searchedPages = <int>{};
@@ -108,6 +116,9 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
 
   /// Whether the search task is currently running or not
   bool get isSearching => _isSearching;
+
+  /// The error that stopped the last search, or null; re-issuing the same pattern then searches again.
+  Object? get searchError => _searchError;
 
   /// Whether searches may run. Inactive sessions retain results and queue the latest request.
   bool get isActive => _isActive;
@@ -156,8 +167,10 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
 
   void notifyListeners() {
     controller?.invalidate();
-    for (final listener in _listeners) {
-      listener();
+    // A listener may remove itself or dispose the searcher during a result
+    // update; do not mutate the collection currently being iterated.
+    for (final listener in List<VoidCallback>.of(_listeners)) {
+      if (_listeners.contains(listener)) listener();
     }
   }
 
@@ -188,7 +201,10 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
     _searchTextTimer?.cancel();
     _pendingSearchCondition = null;
     final last = _lastSearchCondition;
-    if (last != null && last.caseInsensitive == caseInsensitive && _isIdenticalPattern(last.pattern, pattern)) {
+    if (_searchError == null &&
+        last != null &&
+        last.caseInsensitive == caseInsensitive &&
+        _isIdenticalPattern(last.pattern, pattern)) {
       if (startPageNumber != null) {
         _nextPageNumber = startPageNumber;
         // A restart after a document change scans from the moved position too.
@@ -223,6 +239,7 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
     _pendingSearchCondition = null;
     _pausedSearchCondition = null;
     _lastSearchCondition = condition;
+    _searchError = null;
     if (!resume) {
       _matches = const [];
       _matchIndex = null;
@@ -237,7 +254,14 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
       _resetTextSearch();
       return;
     }
-    _startTextSearchInternal(condition, _searchSession, resume: resume);
+    final searchSession = _searchSession;
+    _startTextSearchInternal(condition, searchSession, resume: resume).catchError((Object error) {
+      if (_disposed || searchSession != _searchSession) return;
+      _searchError = error;
+      _isSearching = false;
+      _searchingPageNumber = null;
+      notifyListeners();
+    });
   }
 
   /// Reset the current search.
@@ -275,6 +299,7 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
     _currentIndex = null;
     _currentMatch = null;
     _isSearching = false;
+    _searchError = null;
     _lastSearchCondition = null;
     _pendingSearchCondition = null;
     _pausedSearchCondition = null;
@@ -442,10 +467,7 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
 
   /// Go to the previous match.
   Future<int> goToPrevMatch() async {
-    if (_currentIndex == null) {
-      _currentIndex = _matches.length - 1;
-      return await goToMatchOfIndex(_currentIndex!);
-    }
+    if (_currentIndex == null) return await goToMatchOfIndex(_matches.length - 1);
     if (_currentIndex! > 0) {
       _currentIndex = _currentIndex! - 1;
       return await goToMatchOfIndex(_currentIndex!);
@@ -455,10 +477,7 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
 
   /// Go to the next match.
   Future<int> goToNextMatch() async {
-    if (_currentIndex == null) {
-      _currentIndex = 0;
-      return await goToMatchOfIndex(_currentIndex!);
-    }
+    if (_currentIndex == null) return await goToMatchOfIndex(0);
     if (_currentIndex! + 1 < _matches.length) {
       _currentIndex = _currentIndex! + 1;
       return await goToMatchOfIndex(_currentIndex!);
@@ -472,13 +491,25 @@ abstract class _PdfTextSearcherBase<T> extends Listenable {
   }
 
   Future<void> _navigateToMatch(T match) async {
+    final navigationSession = _searchSession;
+    final controller = this.controller;
     _currentMatch = match;
-    await controller?.ensureVisible(
-      controller!.calcRectForRectInsidePage(pageNumber: _pageNumberOf(match), rect: _boundsOf(match)),
-      margin: 50,
-    );
-    controller?.setCurrentPageNumber(_pageNumberOf(match));
-    controller?.invalidate();
+    if (controller != null) {
+      final navigate = onNavigateToMatch;
+      if (navigate != null) {
+        await navigate(controller, match);
+      } else {
+        await controller.ensureVisible(
+          controller.calcRectForRectInsidePage(pageNumber: _pageNumberOf(match), rect: _boundsOf(match)),
+          margin: 50,
+        );
+      }
+    }
+    if (_disposed || navigationSession != _searchSession || !identical(_currentMatch, match)) {
+      return;
+    }
+    this.controller?.setCurrentPageNumber(_pageNumberOf(match));
+    this.controller?.invalidate();
     notifyListeners();
   }
 
