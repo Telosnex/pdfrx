@@ -1,10 +1,9 @@
 import 'dart:io';
 
-// Keep testing a host that still uses Flutter’s original Material API.
+// Keep coverage for hosts that use the original Material API.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart' as flutter;
-import 'package:flutter_localizations/flutter_localizations.dart'
-    as flutter_localizations;
+import 'package:flutter_localizations/flutter_localizations.dart' as flutter_localizations;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -16,118 +15,81 @@ void main() {
   setUp(() => pdfrxInitialize());
 
   for (final locale in const [Locale('de', 'DE'), Locale('ar')]) {
-    testWidgets(
-      'default context menu falls back with Flutter localizations for $locale',
-      (tester) async {
-        await _binding.setSurfaceSize(const Size(1080, 1920));
-        addTearDown(() => _binding.setSurfaceSize(null));
-
-        final controller = PdfViewerController();
-        final document = await _openTestDocument(
-          tester,
-          'context-menu-$locale.pdf',
-        );
-        addTearDown(() => document?.dispose());
-
-        await _pumpTestViewer(
-          tester,
-          document!,
-          controller,
-          (child) => flutter.MaterialApp(
-            locale: locale,
-            supportedLocales: [locale],
-            // Exercise the fallback with the host’s original localization delegates.
-            // ignore: deprecated_member_use
-            localizationsDelegates:
-                flutter_localizations.GlobalMaterialLocalizations.delegates,
-            home: flutter.Scaffold(body: child),
-          ),
-        );
-
-        await _expectContextMenu(tester, controller);
-        expect(find.text('Copy'), findsOneWidget);
-        final context = tester.element(
-          find.byType(AdaptiveTextSelectionToolbar),
-        );
-        expect(Localizations.localeOf(context), locale);
-        expect(
-          Directionality.of(context),
-          locale.languageCode == 'ar' ? TextDirection.rtl : TextDirection.ltr,
-        );
-        expect(
-          MaterialLocalizations.of(context),
-          isA<DefaultMaterialLocalizations>(),
-        );
-      },
-    );
-  }
-
-  testWidgets(
-    'default context menu works with material_ui MaterialApp localizations',
-    (tester) async {
+    testWidgets('default context menu falls back with Flutter localizations for $locale', (tester) async {
       await _binding.setSurfaceSize(const Size(1080, 1920));
       addTearDown(() => _binding.setSurfaceSize(null));
 
       final controller = PdfViewerController();
-      final document = await _openTestDocument(
-        tester,
-        'context-menu-localizations-test.pdf',
-      );
+      final document = await _openTestDocument(tester, 'context-menu-$locale.pdf');
       addTearDown(() => document?.dispose());
 
       await _pumpTestViewer(
         tester,
         document!,
         controller,
-        (child) => MaterialApp(home: Scaffold(body: child)),
-      );
-
-      await _expectContextMenu(tester, controller);
-      expect(find.text('Copy'), findsOneWidget);
-    },
-  );
-
-  testWidgets(
-    'default context menu uses material_ui MaterialApp localizations',
-    (tester) async {
-      await _binding.setSurfaceSize(const Size(1080, 1920));
-      addTearDown(() => _binding.setSurfaceSize(null));
-
-      final controller = PdfViewerController();
-      final document = await _openTestDocument(
-        tester,
-        'context-menu-flutter-localizations-test.pdf',
-      );
-      addTearDown(() => document?.dispose());
-
-      await _pumpTestViewer(
-        tester,
-        document!,
-        controller,
-        (child) => MaterialApp(
-          localizationsDelegates: GlobalMaterialLocalizations.delegates,
-          supportedLocales: const [Locale('es')],
-          locale: const Locale('es'),
-          home: Scaffold(body: child),
+        (child) => flutter.MaterialApp(
+          locale: locale,
+          supportedLocales: [locale],
+          // Exercise the fallback for the original localization delegates.
+          // ignore: deprecated_member_use
+          localizationsDelegates: flutter_localizations.GlobalMaterialLocalizations.delegates,
+          home: flutter.Scaffold(body: child),
         ),
       );
 
       await _expectContextMenu(tester, controller);
-      expect(find.text('Copiar'), findsOneWidget);
-    },
-  );
+      expect(find.text('Copy'), findsOneWidget);
+      final context = tester.element(find.byType(AdaptiveTextSelectionToolbar));
+      expect(Localizations.localeOf(context), locale);
+      expect(Directionality.of(context), locale.languageCode == 'ar' ? TextDirection.rtl : TextDirection.ltr);
+      expect(MaterialLocalizations.of(context), isA<DefaultMaterialLocalizations>());
+    });
+  }
 
-  testWidgets('default context menu works without Material localizations', (
-    tester,
-  ) async {
+  testWidgets('default context menu works with material_ui MaterialApp localizations', (tester) async {
     await _binding.setSurfaceSize(const Size(1080, 1920));
     addTearDown(() => _binding.setSurfaceSize(null));
 
     final controller = PdfViewerController();
-    final document = await _openTestDocument(
+    final document = await _openTestDocument(tester, 'context-menu-localizations-test.pdf');
+    addTearDown(() => document?.dispose());
+
+    await _pumpTestViewer(tester, document!, controller, (child) => MaterialApp(home: Scaffold(body: child)));
+
+    await _expectContextMenu(tester, controller);
+    expect(find.text('Copy'), findsOneWidget);
+  });
+
+  testWidgets('default context menu uses material_ui MaterialApp localizations', (tester) async {
+    await _binding.setSurfaceSize(const Size(1080, 1920));
+    addTearDown(() => _binding.setSurfaceSize(null));
+
+    final controller = PdfViewerController();
+    final document = await _openTestDocument(tester, 'context-menu-flutter-localizations-test.pdf');
+    addTearDown(() => document?.dispose());
+
+    await _pumpTestViewer(
       tester,
-      'context-menu-no-material-localizations-test.pdf',
+      document!,
+      controller,
+      (child) => MaterialApp(
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        supportedLocales: const [Locale('es')],
+        locale: const Locale('es'),
+        home: Scaffold(body: child),
+      ),
     );
+
+    await _expectContextMenu(tester, controller);
+    expect(find.text('Copiar'), findsOneWidget);
+  });
+
+  testWidgets('default context menu works without Material localizations', (tester) async {
+    await _binding.setSurfaceSize(const Size(1080, 1920));
+    addTearDown(() => _binding.setSurfaceSize(null));
+
+    final controller = PdfViewerController();
+    final document = await _openTestDocument(tester, 'context-menu-no-material-localizations-test.pdf');
     addTearDown(() => document?.dispose());
 
     await _pumpTestViewer(
@@ -136,8 +98,7 @@ void main() {
       controller,
       (child) => WidgetsApp(
         color: const Color(0xff000000),
-        builder: (context, _) =>
-            Overlay(initialEntries: [OverlayEntry(builder: (_) => child)]),
+        builder: (context, _) => Overlay(initialEntries: [OverlayEntry(builder: (_) => child)]),
       ),
     );
 
@@ -145,49 +106,35 @@ void main() {
     expect(find.text('Copy'), findsOneWidget);
   });
 
-  testWidgets(
-    'custom unlabeled context menu item works without Material localizations',
-    (tester) async {
-      await _binding.setSurfaceSize(const Size(1080, 1920));
-      addTearDown(() => _binding.setSurfaceSize(null));
+  testWidgets('custom unlabeled context menu item works without Material localizations', (tester) async {
+    await _binding.setSurfaceSize(const Size(1080, 1920));
+    addTearDown(() => _binding.setSurfaceSize(null));
 
-      final controller = PdfViewerController();
-      final document = await _openTestDocument(
-        tester,
-        'custom-context-menu-no-material-localizations-test.pdf',
-      );
-      addTearDown(() => document?.dispose());
+    final controller = PdfViewerController();
+    final document = await _openTestDocument(tester, 'custom-context-menu-no-material-localizations-test.pdf');
+    addTearDown(() => document?.dispose());
 
-      await _pumpTestViewer(
-        tester,
-        document!,
-        controller,
-        (child) => WidgetsApp(
-          color: const Color(0xff000000),
-          builder: (context, _) =>
-              Overlay(initialEntries: [OverlayEntry(builder: (_) => child)]),
-        ),
-        customizeContextMenuItems: (params, items) => items.add(
-          ContextMenuButtonItem(
-            onPressed: () {},
-            type: ContextMenuButtonType.custom,
-          ),
-        ),
-      );
+    await _pumpTestViewer(
+      tester,
+      document!,
+      controller,
+      (child) => WidgetsApp(
+        color: const Color(0xff000000),
+        builder: (context, _) => Overlay(initialEntries: [OverlayEntry(builder: (_) => child)]),
+      ),
+      customizeContextMenuItems: (params, items) =>
+          items.add(ContextMenuButtonItem(onPressed: () {}, type: ContextMenuButtonType.custom)),
+    );
 
-      await _expectContextMenu(tester, controller);
-      expect(find.text('Copy'), findsOneWidget);
-    },
-  );
+    await _expectContextMenu(tester, controller);
+    expect(find.text('Copy'), findsOneWidget);
+  });
 }
 
 Future<PdfDocument?> _openTestDocument(WidgetTester tester, String sourceName) {
   return tester.runAsync(
-    () async => PdfDocument.openData(
-      await _testPdfFile.readAsBytes(),
-      sourceName: sourceName,
-      useProgressiveLoading: false,
-    ),
+    () async =>
+        PdfDocument.openData(await _testPdfFile.readAsBytes(), sourceName: sourceName, useProgressiveLoading: false),
   );
 }
 
@@ -206,9 +153,7 @@ Future<void> _pumpTestViewer(
         controller: controller,
         params: PdfViewerParams(
           onViewerReady: (_, _) => viewerReady = true,
-          textSelectionParams: const PdfTextSelectionParams(
-            showContextMenuAutomatically: true,
-          ),
+          textSelectionParams: const PdfTextSelectionParams(showContextMenuAutomatically: true),
           customizeContextMenuItems: customizeContextMenuItems,
         ),
       ),
@@ -217,9 +162,7 @@ Future<void> _pumpTestViewer(
 
   for (var i = 0; i < 50 && !viewerReady; i++) {
     await tester.pump(const Duration(milliseconds: 100));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 10)),
-    );
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
   }
 
   expect(controller.isReady, isTrue);
@@ -227,21 +170,12 @@ Future<void> _pumpTestViewer(
   expect(tester.takeException(), isNull);
 }
 
-Future<void> _expectContextMenu(
-  WidgetTester tester,
-  PdfViewerController controller,
-) async {
+Future<void> _expectContextMenu(WidgetTester tester, PdfViewerController controller) async {
   final selection = controller.textSelectionDelegate.selectAllText();
 
-  for (
-    var i = 0;
-    i < 20 && find.byType(AdaptiveTextSelectionToolbar).evaluate().isEmpty;
-    i++
-  ) {
+  for (var i = 0; i < 20 && find.byType(AdaptiveTextSelectionToolbar).evaluate().isEmpty; i++) {
     await tester.pump(const Duration(milliseconds: 100));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 10)),
-    );
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
   }
 
   expect(tester.takeException(), isNull);
