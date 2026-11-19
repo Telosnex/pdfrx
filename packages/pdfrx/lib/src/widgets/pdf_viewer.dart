@@ -23,11 +23,16 @@ import 'interactive_viewer.dart' as iv;
 import 'internals/material_localizations_fallback.dart';
 import 'internals/partial_rendering.dart';
 import 'internals/page_layout_index.dart';
+import 'internals/page_link_loader.dart';
 import 'internals/pdf_error_widget.dart';
 import 'internals/pdf_viewer_key_handler.dart';
 import 'internals/widget_size_sniffer.dart';
+import 'layout/pdf_fit_mode.dart';
+import 'layout/pdf_page_layout_strategy.dart';
+import 'layout/pdf_page_range.dart';
 import 'pdf_page_links_overlay.dart';
 import 'pdf_image_cache_budget.dart';
+import 'pdf_paging.dart';
 import 'pdf_viewer_layout_metrics.dart';
 import 'pdf_viewer_params.dart';
 import 'scroll_interaction/pdf_viewer_scroll_interaction_delegate.dart';
@@ -266,7 +271,7 @@ class _PdfViewerState extends State<PdfViewer>
   int _documentGeneration = 0;
   int _resourceGeneration = 0;
 
-  /// Pending wait of [_notifyDocumentLoadFinished] for the initial page's preview image.
+  /// Pending wait of [_notifyDocumentLoadFinished] for the initial page's image.
   ///
   /// Completed by [_completeInitialPageImageWaiterIfReady] once the image is in [_imageCache], or by
   /// [_onDocumentChanged]/[dispose] so the waiting future can observe that it was abandoned.
@@ -300,6 +305,10 @@ class _PdfViewerState extends State<PdfViewer>
 
   /// The starting/ending point of the text selection.
   PdfTextSelectionPoint? _selA, _selB;
+
+  /// Cached output text for the active selection, without intermediate page geometry.
+  ({PdfTextSelectionPoint a, PdfTextSelectionPoint b, String text})? _selectedTextSnapshot;
+  final _textCopyInvalidators = <void Function(PdfDocumentPageStatusChangedEvent)>{};
   Offset? _textSelectAnchor;
   Offset? _selectionHandleGlobalPosition;
   Ticker? _selectionHandleTicker;
@@ -324,6 +333,12 @@ class _PdfViewerState extends State<PdfViewer>
 
   Timer? _interactionEndedTimer;
   bool _isInteractionGoingOn = false;
+
+  /// Pending settle check in paged mode; see [PdfViewerParams.paging].
+  Timer? _settleTimer;
+
+  /// True once the user has moved the view since the last settle.
+  bool _settlePending = false;
 
   BuildContext? _contextForFocusNode;
 
@@ -372,23 +387,11 @@ class _PdfViewerState extends State<PdfViewer>
   @override
   void didUpdateWidget(covariant PdfViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.params.isVisible != oldWidget.params.isVisible) {
-      _visibilityGeneration++;
-      if (!widget.params.isVisible) {
-        _interactionDelegate?.stop();
-        _animController.stop();
-        _selectionHandleTicker?.stop();
-        _selectionHandleGlobalPosition = null;
-        _interactionEndedTimer?.cancel();
-        _isInteractionGoingOn = false;
-        _clearFontManagerAssociation();
-        _releaseCachedResources(keepVisible: false, keepSelection: true);
-      } else {
-        _updateFontManagerAssociation();
-        unawaited(_loadPagesInBackground());
-      }
-    }
     _layoutDirty = true;
+    if (widget.params.linkHandlerParams?.enableAutoLinkDetection !=
+        oldWidget.params.linkHandlerParams?.enableAutoLinkDetection) {
+      _canvasLinkPainter.resetAll();
+    }
     if (!identical(widget.params.imageCacheBudget, oldWidget.params.imageCacheBudget)) {
       (oldWidget.params.imageCacheBudget ?? _localImageBudget).removeListener(_onImageBudgetChanged);
       _imageBudget.addListener(_onImageBudgetChanged);
@@ -398,12 +401,14 @@ class _PdfViewerState extends State<PdfViewer>
     if (widget.params.isVisible != oldWidget.params.isVisible) {
       _visibilityGeneration++;
       if (!widget.params.isVisible) {
+        _stopSelectionHandleDrag();
+        _setMagnifierVisible(false);
         _interactionDelegate?.stop();
         _animController.stop();
-        _selectionHandleTicker?.stop();
-        _selectionHandleGlobalPosition = null;
         _interactionEndedTimer?.cancel();
         _isInteractionGoingOn = false;
+        _settleTimer?.cancel();
+        _settlePending = false;
         _clearFontManagerAssociation();
         _releaseCachedResources(keepVisible: false, keepSelection: true);
       } else {
@@ -601,7 +606,7 @@ class _PdfViewerState extends State<PdfViewer>
           .toList();
       if (unloadedPageNumbers.isNotEmpty) {
         try {
-          await document.reloadPages(pageNumbersToReload: unloadedPageNumbers);
+          await document.loadPageMetadata(pageNumbers: unloadedPageNumbers);
         } catch (error) {
           debugPrint('PdfViewer: Priority page loading failed: $error');
         }
@@ -662,6 +667,8 @@ class _PdfViewerState extends State<PdfViewer>
     _imageBudget.removeListener(_onImageBudgetChanged);
     _localImageBudget.dispose();
     _textCacheLease?.dispose();
+    _selectedTextSnapshot = null;
+    _textCopyInvalidators.clear();
     _selectionHandleTicker?.dispose();
     SemanticsBinding.instance.removeSemanticsEnabledListener(_onSemanticsEnabledChanged);
     _interactionDelegate?.dispose();
@@ -672,6 +679,9 @@ class _PdfViewerState extends State<PdfViewer>
     _clearFontManagerAssociation();
     _textSelectionChangedDebounceTimer?.cancel();
     _interactionEndedTimer?.cancel();
+    _settleTimer?.cancel();
+    _wheelBurstTimer?.cancel();
+    _animationEndTimer?.cancel();
     _imageCache.cancelAllPendingRenderings();
     _magnifierImageCache.cancelAllPendingRenderings();
     _completeInitialPageImageWaiter();
@@ -691,7 +701,28 @@ class _PdfViewerState extends State<PdfViewer>
 
   void _onMatrixChanged() {
     _updateSelectionHandleAtPointer();
+    if (_settlePending) _scheduleSettle();
+    if (widget.params.onAnimationEnd != null) _scheduleAnimationEndCheck();
     _invalidate();
+  }
+
+  /// Debounce timer for [PdfViewerParams.onAnimationEnd].
+  Timer? _animationEndTimer;
+
+  /// Calls [PdfViewerParams.onAnimationEnd] once the matrix has not changed for a short while and no
+  /// gesture or animation is active.
+  void _scheduleAnimationEndCheck() {
+    _animationEndTimer?.cancel();
+    _animationEndTimer = Timer(const Duration(milliseconds: 50), () {
+      _animationEndTimer = null;
+      if (!mounted) return;
+      if (_interactionStartRect != null || _isUserScrolling) return; // the gesture end checks again
+      if (_animController.isAnimating || _interactiveViewerState?.hasActiveAnimations == true) {
+        _scheduleAnimationEndCheck();
+        return;
+      }
+      widget.params.onAnimationEnd?.call();
+    });
   }
 
   void _updateFontManagerAssociation() {
@@ -716,13 +747,23 @@ class _PdfViewerState extends State<PdfViewer>
 
   void _onDocumentEvent(PdfDocumentEvent event) {
     if (event is PdfDocumentPageStatusChangedEvent) {
+      for (final invalidateCopy in _textCopyInvalidators) {
+        invalidateCopy(event);
+      }
+      final pageCount = event.document.pages.length;
+      if (_layout != null && pageCount < _layout!.pageLayouts.length) {
+        _imageCache.releaseImagesAfter(pageCount);
+        _magnifierImageCache.releaseImagesAfter(pageCount);
+      }
       _layoutDirty = true;
       // FIXME: We can handle the event more efficiently by only updating the affected pages.
       for (final change in event.changes.entries) {
         _imageCache.cancelPendingRenderings(change.key);
         _magnifierImageCache.cancelPendingRenderings(change.key);
-        _imageCache.makeCacheImageForPageDirty(change.key, page: change.value.page);
-        _magnifierImageCache.makeCacheImageForPageDirty(change.key, page: change.value.page);
+        final status = change.value;
+        final metadataOnly = status is PdfPageStatusModified && !status.isContentChanged;
+        _imageCache.makeCacheImageForPageDirty(change.key, page: metadataOnly ? status.page : null);
+        _magnifierImageCache.makeCacheImageForPageDirty(change.key, page: metadataOnly ? status.page : null);
         _canvasLinkPainter.releaseLinksForPage(change.key);
         _textCache?.invalidate(change.key);
       }
@@ -731,7 +772,8 @@ class _PdfViewerState extends State<PdfViewer>
       if (hasSelectedText) {
         final pageFrom = min(_selA!.text.pageNumber, _selB!.text.pageNumber);
         final pageTo = max(_selA!.text.pageNumber, _selB!.text.pageNumber);
-        if (event.changes.keys.any((page) => page >= pageFrom && page <= pageTo)) {
+        if (pageTo > event.document.pages.length ||
+            event.changes.keys.any((page) => page >= pageFrom && page <= pageTo)) {
           _clearTextSelections(invalidate: false);
         }
       }
@@ -747,7 +789,7 @@ class _PdfViewerState extends State<PdfViewer>
     final document = _document;
     final documentRef = widget.documentRef;
     if (succeeded && document != null && document.pages.isNotEmpty) {
-      // Hold the callback until the initial page's preview image is in the cache, so that the document is
+      // Hold the callback until the initial page's image is in the cache, so that the document is
       // visibly rendered when onDocumentLoadFinished fires. The initial page is re-resolved every time an
       // image lands because calculateInitialPageNumber runs at the first layout, which can be after a replayed
       // PdfDocumentLoadCompleteEvent gets here. If that page never renders, this keeps waiting indefinitely.
@@ -768,15 +810,17 @@ class _PdfViewerState extends State<PdfViewer>
     });
   }
 
-  /// Whether [_imageCache] holds a preview image for the currently resolved initial page.
+  /// Whether [_imageCache] holds an image for the currently resolved initial page.
   bool _isInitialPageImageCached() {
     final document = _document;
     if (document == null) return false;
     final initialPageNumber = _clampInitialPageNumber(document, _initialPageNumber ?? widget.initialPageNumber);
-    return _imageCache.pageImages.containsKey(initialPageNumber);
+    return _imageCache.pageImages.containsKey(initialPageNumber) ||
+        (!widget.params.behaviorControlParams.enableLowResolutionPagePreview &&
+            _imageCache.pageImagesPartial.containsKey(initialPageNumber));
   }
 
-  /// Wakes [_notifyDocumentLoadFinished] if the initial page's preview image has just landed in [_imageCache].
+  /// Wakes [_notifyDocumentLoadFinished] if the initial page's image has just landed in [_imageCache].
   void _completeInitialPageImageWaiterIfReady() {
     if (_initialPageImageWaiter == null || !_isInitialPageImageCached()) return;
     _completeInitialPageImageWaiter();
@@ -850,7 +894,11 @@ class _PdfViewerState extends State<PdfViewer>
                             constrained: false,
                             boundaryMargin: widget.params.scrollPhysics == null
                                 ? const EdgeInsets.all(double.infinity) // NOTE: boundaryMargin is handled manually
-                                : _adjustedBoundaryMargins,
+                                : (widget.params.boundaryMargin ?? EdgeInsets.zero),
+                            onTrackpadScroll: _onTrackpadScroll,
+                            boundaryRectProvider: widget.params.scrollPhysics == null
+                                ? null
+                                : _scrollPhysicsBoundaryRect,
                             maxScale: _layoutMetrics.maxScale,
                             minScale: _layoutMetrics.minScale,
                             panAxis: widget.params.panAxis,
@@ -859,7 +907,7 @@ class _PdfViewerState extends State<PdfViewer>
                             scaleGestureSensitivity: widget.params.scaleGestureSensitivity,
                             onInteractionEnd: _onInteractionEnd,
                             onInteractionStart: _onInteractionStart,
-                            onInteractionUpdate: widget.params.onInteractionUpdate,
+                            onInteractionUpdate: _onInteractionUpdate,
                             interactionEndFrictionCoefficient: widget.params.interactionEndFrictionCoefficient,
                             scaleInertiaMaxExcursion: widget.params.scaleInertiaMaxExcursion,
                             onWheelDelta: widget.params.scrollByMouseWheel != null ? _onWheelDelta : null,
@@ -867,7 +915,12 @@ class _PdfViewerState extends State<PdfViewer>
                             onPointerScale: _onPointerScale,
                             scrollPhysics: widget.params.scrollPhysics,
                             scrollPhysicsScale: widget.params.scrollPhysicsScale,
-                            scrollPhysicsAutoAdjustBoundaries: false,
+                            scrollPhysicsAutoAdjustBoundaries: true,
+                            constrainPinch: _constrainPinchToBounds,
+                            underflowAlignment: Alignment(
+                              _splitHorizontalBoundaryExtra(2, widget.params.underflowAnchor).$1 - 1,
+                              _splitVerticalBoundaryExtra(2, widget.params.underflowAnchor).$1 - 1,
+                            ),
                             // PDF pages
                             child: GestureDetector(
                               behavior: HitTestBehavior.opaque,
@@ -939,6 +992,20 @@ class _PdfViewerState extends State<PdfViewer>
     );
   }
 
+  /// Whether the platform is a desktop one, where pinching is done on a trackpad. On the web,
+  /// [defaultTargetPlatform] is the platform the browser runs on, so a phone browser is not one.
+  bool get _isDesktopPlatform =>
+      defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.linux;
+
+  /// On desktop platforms, the content is kept inside the boundaries (centered if it fits in the
+  /// view) while pinching, instead of drifting towards the pinch and snapping back; see
+  /// [iv.InteractiveViewer.constrainPinch]. Touch platforms keep the free pinch.
+  ///
+  /// Only with [PdfViewerParams.scrollPhysics]; without it the pinch does not overscroll.
+  bool get _constrainPinchToBounds => _isDesktopPlatform && widget.params.scrollPhysics != null;
+
   Offset _calcOverscroll(Matrix4 m, {required Size viewSize}) {
     final boundaryMargin = _adjustedBoundaryMargins;
     if (boundaryMargin.containsInfinite) {
@@ -950,12 +1017,26 @@ class _PdfViewerState extends State<PdfViewer>
     var dxDoc = 0.0;
     var dyDoc = 0.0;
 
-    final leftBoundary = -boundaryMargin.left; // negative margin reduces allowed leftward scroll
-    final rightBoundary =
+    var leftBoundary = -boundaryMargin.left; // negative margin reduces allowed leftward scroll
+    var rightBoundary =
         layout.documentSize.width + boundaryMargin.right; // negative margin reduces allowed rightward scroll
-    final topBoundary = -boundaryMargin.top; // negative margin reduces allowed upward scroll
-    final bottomBoundary =
+    var topBoundary = -boundaryMargin.top; // negative margin reduces allowed upward scroll
+    var bottomBoundary =
         layout.documentSize.height + boundaryMargin.bottom; // negative margin reduces allowed downward scroll
+
+    // Paged layout, zoomed in: user panning stops at the current spread's edges.
+    final confined = _confinedSpread;
+    if (confined != null && _isPaged && confined < layout.spreads.length) {
+      final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+      final area = _spreadArea(layout, confined, vertical);
+      if (vertical) {
+        topBoundary = max(topBoundary, area.top);
+        bottomBoundary = min(bottomBoundary, area.bottom);
+      } else {
+        leftBoundary = max(leftBoundary, area.left);
+        rightBoundary = min(rightBoundary, area.right);
+      }
+    }
 
     if (rightBoundary - leftBoundary <= visible.width) {
       dxDoc = (leftBoundary + rightBoundary - visible.left - visible.right) / 2;
@@ -976,9 +1057,7 @@ class _PdfViewerState extends State<PdfViewer>
   }
 
   Matrix4 _calcMatrixForClampedToNearestBoundary(Matrix4 candidate, {required Size viewSize, PdfPageAnchor? anchor}) {
-    if (widget.params.scrollPhysics == null) {
-      _adjustBoundaryMargins(_viewSize!, candidate.zoom, anchor: anchor);
-    }
+    _adjustBoundaryMargins(_viewSize!, candidate.zoom, anchor: anchor);
     final overScroll = _calcOverscroll(candidate, viewSize: viewSize);
     if (overScroll == Offset.zero) {
       return candidate;
@@ -1086,6 +1165,7 @@ class _PdfViewerState extends State<PdfViewer>
           isLayoutChanged: true,
           isViewSizeChanged: false,
         );
+        _centerPagedSpread(currentPageNumber);
       });
     } else if (isLayoutChanged || isViewSizeChanged) {
       Future.microtask(() {
@@ -1102,6 +1182,7 @@ class _PdfViewerState extends State<PdfViewer>
           isLayoutChanged: isLayoutChanged,
           isViewSizeChanged: isViewSizeChanged,
         );
+        _centerPagedSpread(currentPageNumber);
 
         if (!mounted || documentGeneration != _documentGeneration || _controller?.isReady != true) {
           return;
@@ -1114,6 +1195,51 @@ class _PdfViewerState extends State<PdfViewer>
     } else if (currentPageNumber != null && _pageNumber != currentPageNumber) {
       _setCurrentPageNumber(currentPageNumber);
     }
+  }
+
+  /// In paged mode ([PdfViewerParams.paging]), moves the view so that the spread of [pageNumber] is shown
+  /// as page turning shows it (centered if it fits in the view), keeping the zoom.
+  void _centerPagedSpread(int? pageNumber) {
+    final layout = _layout;
+    if (pageNumber == null || layout == null || !_isPaged || _viewSize == null) return;
+    final m = _calcMatrixForPagedSpread(_txController.value, pageNumber);
+    if (m != null) _txController.value = m;
+  }
+
+  /// In paged mode ([PdfViewerParams.paging]), adjusts [m] along the primary axis so that the spread of
+  /// [pageNumber] is centered if it fits in the view, or otherwise the view is kept inside it.
+  /// Returns null for other layouts or if no adjustment is needed.
+  Matrix4? _calcMatrixForPagedSpread(Matrix4 m, int pageNumber) {
+    final layout = _layout;
+    final viewSize = _viewSize;
+    if (layout == null || !_isPaged || viewSize == null) return null;
+    final index = layout.spreadIndexOf(pageNumber);
+    if (index < 0) return null;
+    final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+    final view = m.calcVisibleRect(viewSize);
+    final area = _spreadArea(layout, index, vertical);
+    final zoom = m.zoom;
+    final double delta;
+    if (_lengthOf(area, vertical) <= _lengthOf(view, vertical) + 0.5 / zoom) {
+      delta =
+          (_startOf(area, vertical) + _endOf(area, vertical)) / 2 -
+          (_startOf(view, vertical) + _endOf(view, vertical)) / 2;
+    } else if (_startOf(view, vertical) < _startOf(area, vertical)) {
+      delta = _startOf(area, vertical) - _startOf(view, vertical);
+    } else if (_endOf(view, vertical) > _endOf(area, vertical)) {
+      delta = _endOf(area, vertical) - _endOf(view, vertical);
+    } else {
+      // Zoomed in and inside the spread: keep the position the size delegate restored (e.g. the
+      // content at the top left of the view after a rotation) instead of going back to its start.
+      delta = 0;
+    }
+    if (delta.abs() <= 0.5 / zoom) return null;
+    final center = view.center;
+    return _calcMatrixFor(
+      vertical ? center.translate(0, delta) : center.translate(delta, 0),
+      zoom: zoom,
+      viewSize: viewSize,
+    );
   }
 
   /// Get the state of the internal [iv.InteractiveViewer].
@@ -1211,6 +1337,8 @@ class _PdfViewerState extends State<PdfViewer>
     _interactionEndedTimer?.cancel();
     _interactionEndedTimer = null;
     _isInteractionGoingOn = true;
+    _settleTimer?.cancel();
+    _settlePending = _paging != null;
   }
 
   void _stopInteraction() {
@@ -1218,18 +1346,514 @@ class _PdfViewerState extends State<PdfViewer>
     if (!mounted) return;
     _interactionEndedTimer = Timer(const Duration(milliseconds: 300), () {
       _isInteractionGoingOn = false;
+      if (_settlePending) _scheduleSettle();
       _invalidate();
     });
   }
 
+  /// [PdfViewerParams.paging]; null in continuous mode, which does not snap.
+  PdfPaging? get _paging => widget.params.paging;
+
+  /// Whether the viewer shows one page (spread) at a time; see [PdfViewerParams.paging].
+  bool get _isPaged => widget.params.paging != null;
+
+  /// (Re)starts the settle timer (paged mode). Called on every matrix change while a snap is
+  /// pending, so the snap runs only once the view has been still for [PdfPaging.settleDelay]
+  /// (after drag, fling inertia, wheel scrolling or pinch).
+  void _scheduleSettle() {
+    final paging = _paging;
+    _settleTimer?.cancel();
+    if (paging == null) {
+      _settlePending = false;
+      _confinedSpread = null;
+      return;
+    }
+    _settleTimer = Timer(paging.settleDelay, _settle);
+  }
+
+  void _settle() {
+    _settleTimer = null;
+    final paging = _paging;
+    if (!mounted || !_settlePending || paging == null || !widget.params.isVisible) return;
+    // Still moving; the next matrix change or interaction end reschedules.
+    if (_isInteractionGoingOn ||
+        _animController.isAnimating ||
+        _interactiveViewerState?.hasActiveAnimations == true ||
+        _selPartMoving != _TextSelectionPart.none) {
+      return;
+    }
+    _settlePending = false;
+    _confinedSpread = null;
+    final layout = _layout;
+    final pinchedSpread = _pinchedSpread;
+    _pinchedSpread = null;
+    _pinchContinues = false;
+    final destination = _calcSettleMatrix(
+      pageNumber: layout != null && pinchedSpread != null && pinchedSpread < layout.spreads.length
+          ? layout.spreads[pinchedSpread].firstPageNumber
+          : null,
+    );
+    if (destination != null) unawaited(_goTo(destination, duration: paging.duration));
+  }
+
+  double _startOf(Rect r, bool vertical) => vertical ? r.top : r.left;
+  double _endOf(Rect r, bool vertical) => vertical ? r.bottom : r.right;
+  double _lengthOf(Rect r, bool vertical) => vertical ? r.height : r.width;
+
+  /// The spread's bounds with [PdfPageLayout.margin] on the primary-axis ends.
+  ///
+  /// In paged mode ([PdfViewerParams.paging]), a negative [PdfViewerParams.boundaryMargin] trims that
+  /// margin, as it trims the margin around the document: each spread is shown like a document of its
+  /// own, so a zoomed-in page stops at the same distance from the view on every side, not only on
+  /// the sides that are document edges. It never trims more than the margin (the page itself is not
+  /// cut off), and a positive boundary margin is not added between spreads, where it would reach
+  /// into the neighbors.
+  Rect _spreadArea(PdfPageLayout layout, int index, bool vertical) {
+    final b = layout.spreadBounds[index];
+    final m = layout.margin;
+    final boundaryMargin = _isPaged ? widget.params.boundaryMargin : null;
+    double trimmed(double value) => value.isFinite ? value.clamp(-m, 0.0) : 0.0;
+    return vertical
+        ? Rect.fromLTRB(
+            b.left,
+            b.top - m - trimmed(boundaryMargin?.top ?? 0),
+            b.right,
+            b.bottom + m + trimmed(boundaryMargin?.bottom ?? 0),
+          )
+        : Rect.fromLTRB(
+            b.left - m - trimmed(boundaryMargin?.left ?? 0),
+            b.top,
+            b.right + m + trimmed(boundaryMargin?.right ?? 0),
+            b.bottom,
+          );
+  }
+
+  /// Index of the spread that is the most visible in [view] along the primary axis, or -1.
+  ///
+  /// In paged mode ([PdfViewerParams.paging]), the spread slots are compared, so the gaps between pages
+  /// count towards the nearest spread.
+  int _mostVisibleSpread(PdfPageLayout layout, Rect view) {
+    final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+    final viewStart = _startOf(view, vertical);
+    final viewEnd = _endOf(view, vertical);
+    var best = -1;
+    var bestVisible = 0.0;
+    for (var i = 0; i < layout.spreads.length; i++) {
+      final area = _isPaged ? layout.spreadSlots[i] : _spreadArea(layout, i, vertical);
+      final visible = min(_endOf(area, vertical), viewEnd) - max(_startOf(area, vertical), viewStart);
+      if (visible > bestVisible) {
+        best = i;
+        bestVisible = visible;
+      }
+    }
+    return best;
+  }
+
+  /// Whether the spread (with margins) fits in [view] along the primary axis.
+  bool _spreadFits(PdfPageLayout layout, int index, Rect view, {double? zoom}) {
+    final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+    return _lengthOf(_spreadArea(layout, index, vertical), vertical) <=
+        _lengthOf(view, vertical) + 0.5 / (zoom ?? _currentZoom);
+  }
+
+  /// Matrix that moves the view of [base] (the current matrix by default) along the primary axis by
+  /// [delta] (document units), or null if the move is less than half a pixel.
+  Matrix4? _calcMatrixShiftedAlongPrimaryAxis(double delta, bool vertical, {Matrix4? base}) {
+    final viewSize = _viewSize;
+    if (viewSize == null) return null;
+    final zoom = base?.zoom ?? _currentZoom;
+    if (delta.abs() <= 0.5 / zoom) return null;
+    final center = base != null ? base.calcVisibleRect(viewSize).center : _visibleRect.center;
+    return _calcMatrixFor(
+      vertical ? center.translate(0, delta) : center.translate(delta, 0),
+      zoom: zoom,
+      viewSize: viewSize,
+    );
+  }
+
+  /// Matrix that shows the spread at [index] at the current zoom: centered if it fits in the view,
+  /// otherwise with its start (or end, if [fromEnd]) aligned with the view.
+  Matrix4? _calcMatrixToShowSpread(PdfPageLayout layout, int index, {bool fromEnd = false}) {
+    final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+    final view = _visibleRect;
+    final area = _spreadArea(layout, index, vertical);
+    final double delta;
+    if (_spreadFits(layout, index, view)) {
+      delta =
+          (_startOf(area, vertical) + _endOf(area, vertical)) / 2 -
+          (_startOf(view, vertical) + _endOf(view, vertical)) / 2;
+    } else if (fromEnd) {
+      delta = _endOf(area, vertical) - _endOf(view, vertical);
+    } else {
+      delta = _startOf(area, vertical) - _startOf(view, vertical);
+    }
+    return _calcMatrixShiftedAlongPrimaryAxis(delta, vertical);
+  }
+
+  /// Calculates the matrix that snaps the view of [base] (the current matrix by default) to a page
+  /// (or spread) boundary, or null if no snap is needed. See [PdfPaging] for the rules.
+  ///
+  /// With [pageNumber], the spread of that page is snapped to instead of the most visible one.
+  Matrix4? _calcSettleMatrix({Matrix4? base, int? pageNumber}) {
+    final layout = _layout;
+    final viewSize = _viewSize;
+    if (layout == null || viewSize == null || layout.pageLayouts.isEmpty || viewSize.isEmpty) return null;
+    final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+    final view = base != null ? base.calcVisibleRect(viewSize) : _visibleRect;
+    final zoom = base?.zoom ?? _currentZoom;
+    final pageSpread = pageNumber != null ? layout.spreadIndexOf(pageNumber) : -1;
+    final index = pageSpread >= 0 ? pageSpread : _mostVisibleSpread(layout, view);
+    if (index < 0) return null;
+    final area = _spreadArea(layout, index, vertical);
+    final viewStart = _startOf(view, vertical);
+    final viewEnd = _endOf(view, vertical);
+    Matrix4? shift(double delta) => _calcMatrixShiftedAlongPrimaryAxis(delta, vertical, base: base);
+
+    if (_spreadFits(layout, index, view, zoom: zoom)) {
+      return shift((_startOf(area, vertical) + _endOf(area, vertical)) / 2 - (viewStart + viewEnd) / 2);
+    }
+    // Larger than the view (zoomed in): only align an edge that is visible.
+    if (_startOf(area, vertical) > viewStart) return shift(_startOf(area, vertical) - viewStart);
+    if (_endOf(area, vertical) < viewEnd) return shift(_endOf(area, vertical) - viewEnd);
+    return null; // inside a page larger than the view
+  }
+
+  /// In paged mode ([PdfViewerParams.paging]), snaps the destination of a programmatic move such as
+  /// [PdfViewerController.goToDest] to a page, so that it lands where a user scroll would settle.
+  ///
+  /// [pageNumber] is the page the move targets, if known: its spread is snapped to, so that the
+  /// target stays in view even if a neighbor is more visible at the destination.
+  Matrix4? _snapDestination(Matrix4? destination, {int? pageNumber}) {
+    if (destination == null || _paging == null || _selPartMoving != _TextSelectionPart.none) {
+      return destination;
+    }
+    return _calcSettleMatrix(base: destination, pageNumber: pageNumber) ?? destination;
+  }
+
+  /// View rect and zoom when the current gesture started; used by [_turnPageOnInteractionEnd].
+  Rect? _interactionStartRect;
+  double? _interactionStartZoom;
+
+  /// In paged mode ([PdfViewerParams.paging]), zoomed in so that the current spread is larger than the
+  /// view: the index of that spread. While set, user panning stops at the spread's edges (see
+  /// [_calcOverscroll]); programmatic moves ([_goTo]) and the settle snap clear it.
+  int? _confinedSpread;
+
+  /// With [PdfViewerParams.scrollPhysics], the inner InteractiveViewer computes the pan boundaries;
+  /// this narrows them to the confined spread (see [_confinedSpread]), or returns null to use the
+  /// default boundaries.
+  Rect? _scrollPhysicsBoundaryRect() {
+    final confined = _confinedSpread;
+    final layout = _layout;
+    // A pinch has ended below the min scale: the snap-back lands on the spread it started on.
+    final pinchedSpread = _pinchedSpread;
+    final viewSize = _viewSize;
+    if (pinchedSpread != null &&
+        _interactionStartRect == null &&
+        _isScaleOverscrolled &&
+        layout != null &&
+        viewSize != null &&
+        pinchedSpread < layout.spreads.length) {
+      // What the view shows of this spread once the zoom is back at the min scale: the spread
+      // centered, or all of it if it is longer than the view, as the settle snap would leave it.
+      // ([PdfPageLayout.spreadSlots] is not used: it is derived from the gaps between the spreads and
+      // is off-center when neighboring spreads differ in length.)
+      final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+      final area = _spreadArea(layout, pinchedSpread, vertical);
+      final viewLength = _lengthOf(Offset.zero & viewSize, vertical) / _layoutMetrics.minScale;
+      final length = max(_lengthOf(area, vertical), viewLength);
+      final center = (_startOf(area, vertical) + _endOf(area, vertical)) / 2;
+      // Across the scroll axis, the usual bounds: the document with the boundary margin.
+      final margin = widget.params.boundaryMargin ?? EdgeInsets.zero;
+      final documentRect = Offset.zero & layout.documentSize;
+      final bounds = margin.containsInfinite ? documentRect : margin.inflateRect(documentRect);
+      // Along the scroll axis, keep that range inside the bounds too (the first and last spreads).
+      var start = center - length / 2;
+      final boundsStart = _startOf(bounds, vertical);
+      final boundsEnd = _endOf(bounds, vertical);
+      if (length <= boundsEnd - boundsStart) start = start.clamp(boundsStart, boundsEnd - length);
+      return vertical
+          ? Rect.fromLTRB(bounds.left, start, bounds.right, start + length)
+          : Rect.fromLTRB(start, bounds.top, start + length, bounds.bottom);
+    }
+    if (confined == null || layout == null || !_isPaged || confined >= layout.spreads.length) return null;
+    final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+    final boundaryMargin = widget.params.boundaryMargin ?? EdgeInsets.zero;
+    final docRect = Offset.zero & layout.documentSize;
+    final base = boundaryMargin.containsInfinite ? docRect : boundaryMargin.inflateRect(docRect);
+    final area = _spreadArea(layout, confined, vertical);
+    return vertical
+        ? Rect.fromLTRB(base.left, max(base.top, area.top), base.right, min(base.bottom, area.bottom))
+        : Rect.fromLTRB(max(base.left, area.left), base.top, min(base.right, area.right), base.bottom);
+  }
+
+  /// Whether a pinch has the zoom below the min scale (the scale overscroll of bouncing physics).
+  bool get _isScaleOverscrolled => _currentZoom < _layoutMetrics.minScale * 0.999;
+
+  /// In paged mode ([PdfViewerParams.paging]), the only spread to show, or null to show every
+  /// visible page.
+  ///
+  /// The spread slots hide the neighbor spreads only down to the home zoom. While a pinch has the
+  /// zoom below the min scale, the view is longer than a slot and the neighbors would show; they are
+  /// hidden then (neither painted, nor given link or overlay widgets), so zooming out shows the
+  /// pinched spread alone. At any other time every visible page is shown, so that a drag or a page
+  /// turn shows the neighbor sliding in.
+  int? get _soleSpreadToShow => _isPaged && _isScaleOverscrolled ? _pinchedSpread : null;
+
+  /// Sets [_confinedSpread] for the current view of a paged layout, if it is zoomed in.
+  void _updateConfinedSpread() {
+    final layout = _layout;
+    _confinedSpread = null;
+    if (layout == null || !_isPaged || _viewSize == null || layout.pageLayouts.isEmpty) return;
+    final index = _mostVisibleSpread(layout, _visibleRect);
+    if (index >= 0 && !_spreadFits(layout, index, _visibleRect)) _confinedSpread = index;
+  }
+
+  /// In paged mode ([PdfViewerParams.paging]), the spread a pinch-zoom started on, from the moment
+  /// the gesture changes the zoom until the view has settled. The pinch belongs to this spread:
+  ///
+  /// * while the zoom is below the min scale, it is the only spread shown ([_soleSpreadToShow]);
+  /// * the snap-back from below the min scale lands on it ([_scrollPhysicsBoundaryRect]);
+  /// * the pinch does not turn the page ([_turnPageOnInteractionEnd]), and the settle snap stays on
+  ///   it even if the pinch has dragged a neighbor further into view ([_settle]).
+  int? _pinchedSpread;
+
+  /// Whether a finger of the pinch is still down, so that the next gesture is the rest of it.
+  ///
+  /// A pinch never ends in one piece: one finger lifts first, which ends the two-finger gesture with
+  /// [ScaleEndDetails.pointerCount] 1, and the finger still down starts a new one-finger gesture. That
+  /// lone finger usually moves a little while lifting, which looks like a drag, or with some speed
+  /// like a flick.
+  bool _pinchContinues = false;
+
+  void _onInteractionUpdate(ScaleUpdateDetails details) {
+    final layout = _layout;
+    final startView = _interactionStartRect;
+    final startZoom = _interactionStartZoom;
+    if (_isPaged && _pinchedSpread == null && layout != null && startView != null && startZoom != null) {
+      if ((_currentZoom - startZoom).abs() > startZoom * 0.01) {
+        final index = _mostVisibleSpread(layout, startView);
+        if (index >= 0) _pinchedSpread = index;
+      }
+    }
+    widget.params.onInteractionUpdate?.call(details);
+  }
+
+  /// Turns to the adjacent spread in paged mode ([PdfViewerParams.paging]) ([direction] is 1 or -1) and
+  /// animates there. Returns false if there is no spread in that direction.
+  bool _turnPage(PdfPageLayout layout, int from, int direction, PdfPaging paging) {
+    final target = from + direction;
+    if (target < 0 || target >= layout.spreads.length) return false;
+    _turnPageTo(layout, target, paging, fromEnd: direction < 0);
+    return true;
+  }
+
+  void _turnPageTo(PdfPageLayout layout, int target, PdfPaging paging, {bool fromEnd = false}) {
+    _settleTimer?.cancel();
+    _settlePending = false;
+    _confinedSpread = null;
+    _pinchedSpread = null;
+    _pinchContinues = false;
+    final destination = _calcMatrixToShowSpread(layout, target, fromEnd: fromEnd);
+    // The inner InteractiveViewer starts the fling inertia right after onInteractionEnd returns.
+    scheduleMicrotask(() {
+      if (!mounted) return;
+      _stopInteractiveViewerAnimation();
+      if (destination != null) unawaited(_goTo(destination, duration: paging.duration));
+    });
+  }
+
+  /// Page turning when a pan gesture ends in paged mode ([PdfViewerParams.paging]). Returns true if
+  /// handled; see [PdfPaging] for the rules.
+  bool _turnPageOnInteractionEnd(ScaleEndDetails details) {
+    final startView = _interactionStartRect;
+    final startZoom = _interactionStartZoom;
+    _interactionStartRect = null;
+    _interactionStartZoom = null;
+
+    final paging = _paging;
+    final layout = _layout;
+    if (paging == null ||
+        startView == null ||
+        startZoom == null ||
+        layout == null ||
+        !_isPaged ||
+        layout.pageLayouts.isEmpty ||
+        !widget.params.isVisible ||
+        _selPartMoving != _TextSelectionPart.none) {
+      return false;
+    }
+    final zoom = _currentZoom;
+    if ((zoom - startZoom).abs() > startZoom * 0.01) return false; // pinch-zoom; snapped on settle
+    // A pinch that has not settled yet (see [_pinchedSpread]): the finger still down after the other
+    // has lifted is not a drag or a flick, however it moves while lifting; and a page turn would
+    // cancel the snap-back of the scale.
+    if (_pinchedSpread != null) return false;
+
+    final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+    final startIndex = _mostVisibleSpread(layout, startView);
+    if (startIndex < 0) return false;
+
+    final view = _visibleRect;
+    final velocity = details.velocity.pixelsPerSecond;
+    final primaryVelocity = vertical ? velocity.dy : velocity.dx;
+    final crossVelocity = vertical ? velocity.dx : velocity.dy;
+    final isFling = primaryVelocity.abs() >= paging.flingVelocity && primaryVelocity.abs() >= crossVelocity.abs();
+    // Content follows the finger, so the view moves against the velocity.
+    final direction = primaryVelocity < 0 ? 1 : -1;
+
+    if (!_spreadFits(layout, startIndex, startView)) {
+      // Zoomed in: panning stops at the page edge; a fling that starts there turns the page.
+      if (!isFling) return false;
+      final area = _spreadArea(layout, startIndex, vertical);
+      final tolerance = 2 / zoom;
+      final atEdge = direction > 0
+          ? _endOf(startView, vertical) >= _endOf(area, vertical) - tolerance
+          : _startOf(startView, vertical) <= _startOf(area, vertical) + tolerance;
+      if (!atEdge) return false;
+      return _turnPage(layout, startIndex, direction, paging);
+    }
+
+    int target;
+    if (isFling) {
+      final moved = _startOf(view, vertical) - _startOf(startView, vertical);
+      // A flick against the drag returns to the starting spread.
+      target = moved * direction < 0 ? startIndex : (startIndex + direction).clamp(0, layout.spreads.length - 1);
+    } else {
+      // The spread that is more than half visible.
+      target = _mostVisibleSpread(layout, view);
+      if (target < 0) target = startIndex;
+    }
+    _turnPageTo(layout, target, paging, fromEnd: target < startIndex);
+    return true;
+  }
+
+  /// Wheel bursts: wheel events less than this apart belong to one gesture.
+  static const _wheelBurstGap = Duration(milliseconds: 200);
+  Timer? _wheelBurstTimer;
+
+  /// How the current wheel burst is handled: true to turn pages, false to scroll within a zoomed-in
+  /// spread (the burst did not start at its edge), null if not decided yet.
+  bool? _wheelBurstTurns;
+
+  /// Mouse wheel: the spread the current burst has turned to (notches during the turn animation turn
+  /// further from it), and the delta accumulated towards the next turn.
+  int? _wheelTargetSpread;
+  double _wheelAccumulated = 0;
+
+  /// Wheel delta (logical pixels) that turns one page; a mouse wheel notch is usually 100 or more.
+  static const _wheelDeltaPerPage = 50.0;
+
+  /// Mouse wheel / trackpad scrolling in paged mode ([PdfViewerParams.paging]). Returns true if [delta]
+  /// (content movement in view pixels) was consumed.
+  ///
+  /// * Mouse wheel ([trackpad] false): each notch turns one spread; notches during the turn
+  ///   animation turn further.
+  /// * Trackpad (web): each swipe (including its momentum) turns one spread.
+  /// * When zoomed in, it scrolls within the spread instead, and turns only if the burst of wheel
+  ///   events started at the spread's edge.
+  bool _onPagedWheel(Offset delta, {required bool trackpad}) {
+    final layout = _layout;
+    final paging = _paging;
+    if (layout == null || !_isPaged || paging == null || _viewSize == null || layout.pageLayouts.isEmpty) {
+      return false;
+    }
+    final vertical = layout.effectivePrimaryAxis == Axis.vertical;
+    final primaryDelta = vertical ? delta.dy : delta.dx;
+    final isNewBurst = _wheelBurstTimer == null;
+    _wheelBurstTimer?.cancel();
+    _wheelBurstTimer = Timer(_wheelBurstGap, () {
+      _wheelBurstTimer = null;
+      _wheelBurstTurns = null;
+      _wheelTargetSpread = null;
+      _wheelAccumulated = 0;
+    });
+    if (primaryDelta.abs() < 0.01) return _wheelBurstTurns != false;
+    final direction = primaryDelta < 0 ? 1 : -1;
+
+    if (_wheelBurstTurns == null) {
+      final view = _visibleRect;
+      final index = _mostVisibleSpread(layout, view);
+      if (index < 0) return false;
+      if (_spreadFits(layout, index, view)) {
+        _wheelBurstTurns = true;
+      } else {
+        // Zoomed in: turn only if the burst starts at the edge; otherwise scroll within the spread.
+        final area = _spreadArea(layout, index, vertical);
+        final tolerance = 2 / _currentZoom;
+        final atEdge = direction > 0
+            ? _endOf(view, vertical) >= _endOf(area, vertical) - tolerance
+            : _startOf(view, vertical) <= _startOf(area, vertical) + tolerance;
+        _confinedSpread = index;
+        if (!atEdge) {
+          if (isNewBurst) _wheelBurstTurns = false;
+          return false;
+        }
+        _wheelBurstTurns = true;
+        // A zoomed-in page is scrolled after the turn, so the rest of the burst only turns once.
+        _turnPage(layout, index, direction, paging);
+        _wheelTargetSpread = -1;
+        return true;
+      }
+    }
+    if (_wheelBurstTurns == false) return false;
+    if (_wheelTargetSpread == -1) return true; // turned once while zoomed in; ignore the rest
+
+    // A trackpad turns one spread per swipe; ignore the rest of it (and its momentum).
+    if (trackpad && _wheelTargetSpread != null) return true;
+
+    if (_wheelAccumulated * primaryDelta < 0) _wheelAccumulated = 0; // direction changed
+    _wheelAccumulated += primaryDelta;
+    if (_wheelAccumulated.abs() < _wheelDeltaPerPage) return true;
+    _wheelAccumulated = 0;
+    final from = _wheelTargetSpread ?? _mostVisibleSpread(layout, _visibleRect);
+    if (from < 0) return false;
+    final target = from + direction;
+    if (target < 0 || target >= layout.spreads.length) return true;
+    _wheelTargetSpread = target;
+    _turnPageTo(layout, target, paging, fromEnd: direction < 0);
+    return true;
+  }
+
+  /// Web trackpad scroll events (which the inner InteractiveViewer would otherwise pan by).
+  bool _onTrackpadScroll(PointerScrollEvent event) => _onPagedWheel(-event.scrollDelta, trackpad: true);
+
+  /// Whether a scroll by an external widget is in progress; see [PdfViewerController.beginUserScroll].
+  bool _isUserScrolling = false;
+
+  void _beginUserScroll() {
+    _stopInteractiveViewerAnimation();
+    _interactionDelegate?.stop();
+    _startInteraction();
+    _confinedSpread = null;
+    _isUserScrolling = true;
+  }
+
+  void _endUserScroll() {
+    if (!_isUserScrolling) return;
+    _isUserScrolling = false;
+    _stopInteraction();
+    if (widget.params.onAnimationEnd != null) _scheduleAnimationEndCheck();
+  }
+
   void _onInteractionEnd(ScaleEndDetails details) {
     widget.params.onInteractionEnd?.call(details);
+    _turnPageOnInteractionEnd(details);
+    _pinchContinues = _pinchedSpread != null && details.pointerCount > 0;
     _stopInteraction();
+    if (widget.params.onAnimationEnd != null) _scheduleAnimationEndCheck();
   }
 
   void _onInteractionStart(ScaleStartDetails details) {
     _interactionDelegate?.stop(); // Stop physics when user touches
     _startInteraction();
+    // A new gesture, unless it is the rest of a pinch or interrupts its snap-back.
+    if (!_pinchContinues && !_isScaleOverscrolled) _pinchedSpread = null;
+    if (_viewSize != null) {
+      _interactionStartRect = _visibleRect;
+      _interactionStartZoom = _currentZoom;
+      _updateConfinedSpread();
+    }
     _requestFocus();
     widget.params.onInteractionStart?.call(details);
   }
@@ -1445,15 +2069,31 @@ class _PdfViewerState extends State<PdfViewer>
       _pageLayoutIndex = null;
       return false;
     }
-    if (!_layoutDirty && _layout != null && widget.params.layoutPages == null) return false;
-    final newLayout = (widget.params.layoutPages ?? _layoutPages)(_document!.pages, widget.params);
+    if (!_layoutDirty && _layout != null) return false;
+    // The viewport is passed to resolve() and never stored on the strategy, so a resize relayouts
+    // (it sets _layoutDirty) while params stay equal.
+    final newLayout = widget.params.layoutStrategy.resolve(
+      PdfPageLayoutContext(
+        pages: _document!.pages,
+        viewport: _viewSize ?? Size.zero,
+        boundaryMargin: widget.params.boundaryMargin,
+        paged: _isPaged,
+      ),
+    );
     _layoutDirty = false;
-    if (_layout?.documentSize == newLayout.documentSize && _pageLayoutIndex?.matches(newLayout.pageLayouts) == true) {
+    if (_layout?.documentSize == newLayout.documentSize &&
+        _layout?.margin == newLayout.margin &&
+        _layout?.fitMode == newLayout.fitMode &&
+        _layout?.primaryAxis == newLayout.primaryAxis &&
+        _pageLayoutIndex?.matches(newLayout.pageLayouts) == true) {
       return false;
     }
 
     _layout = newLayout;
     _pageLayoutIndex = PageLayoutIndex(newLayout.pageLayouts);
+    // Spread indices of the previous layout are meaningless now.
+    _pinchedSpread = null;
+    _pinchContinues = false;
     _isSimplePageLayout = _isSimpleLayout(
       newLayout.pageLayouts,
       newLayout.documentSize.width > newLayout.documentSize.height,
@@ -1468,7 +2108,9 @@ class _PdfViewerState extends State<PdfViewer>
       viewSize: _viewSize ?? Size.zero,
       layout: _layout,
       pageNumber: pageNumber,
-      pageMargin: widget.params.margin,
+      // The layout bakes its margin into the geometry; pass the same margin so the delegate's
+      // fit/min scale matches.
+      pageMargin: _pageMargin,
       boundaryMargin: widget.params.boundaryMargin,
     );
   }
@@ -1552,8 +2194,11 @@ class _PdfViewerState extends State<PdfViewer>
     final linkWidgets = <Widget>[];
     final overlayWidgets = <Widget>[];
     final targetRect = _getCacheExtentRect();
+    final soleSpread = _soleSpreadToShow;
 
     for (final i in _pageLayoutIndex!.intersecting(targetRect)) {
+      // The widgets of a hidden page are hidden with it.
+      if (soleSpread != null && _layout!.spreadIndexOf(i + 1) != soleSpread) continue;
       final rect = _layout!.pageLayouts[i];
 
       final page = _document!.pages[i];
@@ -1755,14 +2400,6 @@ class _PdfViewerState extends State<PdfViewer>
   /// [_CustomPainter] calls the function to paint PDF pages.
   void _paintPages(ui.Canvas canvas, ui.Size size) {
     if (!_initialized || !widget.params.isVisible) return;
-    if (_selPartMoving == _TextSelectionPart.none || _magnifierRect == null) {
-      for (final image in [
-        ..._magnifierImageCache.pageImages.values,
-        ..._magnifierImageCache.pageImagesPartial.values,
-      ]) {
-        image.budgetEntry?.touch(isPinned: false, isNeeded: false);
-      }
-    }
     _updateTextCachePins();
     final visibleRect = _visibleRect;
     // Only scrolling sets the direction: a zoom restarts the measure, and small corrections are ignored.
@@ -1803,11 +2440,7 @@ class _PdfViewerState extends State<PdfViewer>
     final previous = _textCachePins;
     if (previous?.first == first && previous?.last == last && listEquals(previous?.visible, visible)) return;
     _textCachePins = (first: first, last: last, visible: visible);
-    final pinned = {
-      for (final i in visible) i + 1,
-      if (first != null && last != null)
-        for (var n = first; n <= last; n++) n,
-    };
+    final pinned = {for (final i in visible) i + 1, ?first, ?last};
     _textCacheLease?.updatePinnedPages(pinned);
   }
 
@@ -1821,7 +2454,7 @@ class _PdfViewerState extends State<PdfViewer>
     bool enableLowResolutionPagePreview = true,
     FilterQuality filterQuality = FilterQuality.high,
   }) {
-    if (!widget.params.isVisible) return;
+    if (!_canRenderCache(cache)) return;
     final unusedPageList = <int>[];
     final previewRequests = <({PdfPage page, double scale, Rect rect})>[];
     final unmeasuredPageList = <int>[];
@@ -1853,16 +2486,33 @@ class _PdfViewerState extends State<PdfViewer>
       }
     }
     final pageIndices = _pageLayoutIndex!.intersecting(cacheTargetRect);
+    if (identical(cache, _imageCache)) {
+      final soleSpread = _soleSpreadToShow;
+      _canvasLinkPainter.retainPages([
+        for (final i in pageIndices)
+          if (soleSpread == null || _layout!.spreadIndexOf(i + 1) == soleSpread) _document!.pages[i],
+      ]);
+    }
     final retainedPages = pageIndices.map((i) => i + 1).toSet();
     bool isAhead(Rect rect) {
       final offset = rect.center - targetRect.center;
       return offset.dx * _readingDirection.dx + offset.dy * _readingDirection.dy > 0;
     }
 
-    // Visible pages first, then those ahead of the reader, then the nearest.
+    double visibleAreaOf(Rect rect) {
+      final visible = rect.intersect(targetRect);
+      return max(0.0, visible.width) * max(0.0, visible.height);
+    }
+
+    // Visible pages first, the most visible of them first, then those ahead of the reader, then the nearest.
+    // Without the area, a sliver of the page ahead renders before the page that fills the screen.
     int byPriority(Rect a, Rect b) {
       final aVisible = a.overlaps(targetRect);
       if (aVisible != b.overlaps(targetRect)) return aVisible ? -1 : 1;
+      if (aVisible) {
+        final byArea = visibleAreaOf(b).compareTo(visibleAreaOf(a));
+        if (byArea != 0) return byArea;
+      }
       final aAhead = isAhead(a);
       if (aAhead != isAhead(b)) return aAhead ? -1 : 1;
       return _distanceToRect(a, targetRect).compareTo(_distanceToRect(b, targetRect));
@@ -1883,11 +2533,27 @@ class _PdfViewerState extends State<PdfViewer>
       final isVisible = cache.visiblePageNumbers.contains(entry.key);
       entry.value.budgetEntry?.touch(isPinned: isVisible, isNeeded: isVisible);
     }
-    for (final pageNumber in cache.pendingPageNumbers.toList()) {
-      if (!retainedPages.contains(pageNumber)) cache.cancelPendingRenderings(pageNumber);
+    // Exhausted failures have no pending timer, but their retry budget also ends when the page leaves the extent.
+    for (final pageNumber in {
+      ...cache.pendingPageNumbers,
+      ...cache.previewRenderFailures.keys,
+      ...cache.partialRenderFailures.keys,
+    }) {
+      if (!retainedPages.contains(pageNumber)) {
+        cache.cancelPendingRenderings(pageNumber);
+        cache.clearRenderFailures(pageNumber);
+      }
     }
-    unusedPageList.addAll(cache.pageImages.keys.where((pageNumber) => !retainedPages.contains(pageNumber)));
+    // Partials can exist without previews, including when low-resolution previews are disabled.
+    unusedPageList.addAll(
+      {
+        ...cache.pageImages.keys,
+        ...cache.pageImagesPartial.keys,
+      }.where((pageNumber) => !retainedPages.contains(pageNumber)),
+    );
+    final soleSpread = _soleSpreadToShow;
     for (final i in pageIndices) {
+      if (soleSpread != null && _layout!.spreadIndexOf(i + 1) != soleSpread) continue;
       final rect = _layout!.pageLayouts[i];
       final page = _document!.pages[i];
       firstInExtent ??= page.pageNumber;
@@ -1983,7 +2649,7 @@ class _PdfViewerState extends State<PdfViewer>
         // `scale` (not `pageScale`) converts document units to physical pixels.
         // `pageScale` additionally carries the layout-to-page-size ratio, which
         // `_createRealSizePartialImage` would apply a second time via
-        // `pageRect.width * scale` -- under-rendering a custom `layoutPages`
+        // `pageRect.width * scale` -- under-rendering a layout strategy
         // that does not lay pages out at their natural size.
         partialRequest = _requestRealSizePartialImage(cache, page, scale, targetRect, visibleArea);
       }
@@ -2041,7 +2707,10 @@ class _PdfViewerState extends State<PdfViewer>
     previewRequests.sort((a, b) => byPriority(a.rect, b.rect));
     if (previewRequests.any((request) => cache.visiblePageNumbers.contains(request.page.pageNumber))) {
       for (final pageNumber in cache.pendingPageNumbers.toList()) {
-        if (!cache.visiblePageNumbers.contains(pageNumber)) cache.cancelPendingRenderings(pageNumber);
+        if (!cache.visiblePageNumbers.contains(pageNumber)) {
+          // Deprioritizing a prefetch must not make a failed request eligible before its backoff expires.
+          cache.cancelPendingRenderings(pageNumber, cancelRetryTimers: false);
+        }
       }
     }
     // Once a request waits for pageImageCachingDelay, later offscreen ones wait too, so they keep their order.
@@ -2174,8 +2843,7 @@ class _PdfViewerState extends State<PdfViewer>
       switch (entry.kind) {
         case _VisiblePageImageKind.none:
           continue;
-        // A failure is reported even while the viewer retries (it may retry on every repaint); the failure record is
-        // only cleared when an image is produced or the page or cache changes.
+        // A failure stays visible during the bounded retries, until an image is produced or the request changes.
         case _VisiblePageImageKind.unmeasured:
           if (!document.pages[index].isLoaded && (_measurementFailures[pageNumber] ?? 0) > 0) {
             failed = true;
@@ -2185,7 +2853,7 @@ class _PdfViewerState extends State<PdfViewer>
         case _VisiblePageImageKind.preview:
           final image = entry.image;
           if (image != null && identical(cache.pageImages[pageNumber], image) && !image.isDirty) continue;
-          if (cache.previewRenderFailures[pageNumber] == entry.scale) {
+          if (cache.previewRenderFailures[pageNumber]?.key == entry.scale) {
             failed = true;
             continue;
           }
@@ -2194,7 +2862,7 @@ class _PdfViewerState extends State<PdfViewer>
           final image = entry.image;
           if (image != null && identical(cache.pageImagesPartial[pageNumber], image) && !image.isDirty) continue;
           final failure = cache.partialRenderFailures[pageNumber];
-          if (failure != null && failure.rect == entry.partialRect && failure.scale == entry.scale) {
+          if (failure != null && failure.key.rect == entry.partialRect && failure.key.scale == entry.scale) {
             failed = true;
             continue;
           }
@@ -2247,9 +2915,9 @@ class _PdfViewerState extends State<PdfViewer>
     }
     if (toMeasure.isEmpty) return;
 
-    // Deliberately not serialised. reloadPages reads the page list *after* its
-    // await and writes it back synchronously, so concurrent calls cannot clobber
-    // one another. Queueing them would mean one slow page -- a measurement that
+    // Deliberately not serialised here. Metadata loaders apply their results to
+    // the current page snapshot without overwriting concurrent edits. Queueing
+    // them here would mean one slow page -- a measurement that
     // faults a block and waits on the network -- holding up every other visible
     // page behind it, which shows up as a screen of blank pages instead of one.
     Future.microtask(() async {
@@ -2271,7 +2939,7 @@ class _PdfViewerState extends State<PdfViewer>
         final before = Pdfrx.debugLazyLoading
             ? {for (final n in pending) n: _fmtPageSize(document.pages[n - 1])}
             : null;
-        await document.reloadPages(pageNumbersToReload: pending);
+        await document.loadPageMetadata(pageNumbers: pending);
         if (Pdfrx.debugLazyLoading && mounted && _document == document) {
           final changed = <String>[];
           for (final n in pending) {
@@ -2360,7 +3028,9 @@ class _PdfViewerState extends State<PdfViewer>
           final sw = Pdfrx.debugLazyLoading ? (Stopwatch()..start()) : null;
           final bytesAtStart = Pdfrx.debugBytesFetched;
           final text = await cache.load(page);
-          if (!isActive() || !identical(page, document.pages[pageNumber - 1])) return null;
+          if (!isActive() || pageNumber > document.pages.length || !identical(page, document.pages[pageNumber - 1])) {
+            return null;
+          }
           if (sw != null) {
             final fetched = Pdfrx.debugBytesFetched - bytesAtStart;
             pdfrxLazyLog(
@@ -2397,21 +3067,6 @@ class _PdfViewerState extends State<PdfViewer>
       }
     }
     return false;
-  }
-
-  PdfPageLayout _layoutPages(List<PdfPage> pages, PdfViewerParams params) {
-    final width = pages.fold(0.0, (w, p) => max(w, p.width)) + params.margin * 2;
-
-    final pageLayout = <Rect>[];
-    var y = params.margin;
-    for (var i = 0; i < pages.length; i++) {
-      final page = pages[i];
-      final rect = Rect.fromLTWH((width - page.width) / 2, y, page.width, page.height);
-      pageLayout.add(rect);
-      y += page.height + params.margin;
-    }
-
-    return PdfPageLayout(pageLayouts: pageLayout, documentSize: Size(width, y));
   }
 
   void _invalidate({bool relayout = false}) {
@@ -2467,6 +3122,10 @@ class _PdfViewerState extends State<PdfViewer>
     PdfImageReservation reservation, {
     bool partial = false,
   }) {
+    if (!_canRenderCache(cache)) {
+      image.dispose();
+      return false;
+    }
     final entry = reservation.commit(
       retainedBytes: image.width * image.height * 8,
       isPinned: cache.visiblePageNumbers.contains(pageNumber),
@@ -2490,10 +3149,11 @@ class _PdfViewerState extends State<PdfViewer>
 
   /// Returns whether the request waits for pageImageCachingDelay.
   bool _requestPagePreviewImageCached(_PdfPageImageCache cache, PdfPage page, double scale, {bool defer = false}) {
-    if (!widget.params.isVisible) return false;
+    if (!_canRenderCache(cache)) return false;
     final width = page.width * scale;
     final height = page.height * scale;
     if (width < 1 || height < 1) return false;
+    if (!_canRetryRender(cache.previewRenderFailures, page.pageNumber, scale)) return false;
 
     // if this is the first time to render the page, render it immediately
     if (!cache.pageImages.containsKey(page.pageNumber) &&
@@ -2518,7 +3178,9 @@ class _PdfViewerState extends State<PdfViewer>
     double height,
     double scale,
   ) async {
-    if (!mounted || !widget.params.isVisible) return;
+    if (!_canRenderCache(cache)) return;
+    if (!_canRetryRender(cache.previewRenderFailures, page.pageNumber, scale)) return;
+    final requestedScale = scale;
     final prev = cache.pageImages[page.pageNumber];
     if (prev != null && !prev.isDirty && prev.scale == scale) return;
     final cancellationToken = page.createCancellationToken();
@@ -2582,7 +3244,9 @@ class _PdfViewerState extends State<PdfViewer>
             priority: priority,
           );
           if (rendered == null || !mounted || !widget.params.isVisible || cancellationToken.isCanceled) {
-            if (rendered == null && !cancellationToken.isCanceled) cache.previewRenderFailures[page.pageNumber] = scale;
+            if (rendered == null && mounted && widget.params.isVisible && !cancellationToken.isCanceled) {
+              _recordRenderFailure(cache.previewRenderFailures, page.pageNumber, requestedScale);
+            }
             if (sw != null) {
               // A null here is a silent failure that leaves the page white --
               // pdfium declined to produce a bitmap and nothing upstream records
@@ -2608,7 +3272,7 @@ class _PdfViewerState extends State<PdfViewer>
           if (!_retainImage(cache, page.pageNumber, newImage, reservation)) return;
           cache.pageImages[page.pageNumber]?.dispose();
           cache.pageImages[page.pageNumber] = newImage;
-          cache.previewRenderFailures.remove(page.pageNumber);
+          cache.previewRenderFailures.remove(page.pageNumber)?.dispose();
           if (identical(cache, _imageCache)) _completeInitialPageImageWaiterIfReady();
           if (sw != null) {
             final fetched = Pdfrx.debugBytesFetched - bytesAtRequest;
@@ -2620,7 +3284,9 @@ class _PdfViewerState extends State<PdfViewer>
           }
           _invalidate();
         } catch (e) {
-          if (!cancellationToken.isCanceled) cache.previewRenderFailures[page.pageNumber] = scale;
+          if (mounted && widget.params.isVisible && !cancellationToken.isCanceled) {
+            _recordRenderFailure(cache.previewRenderFailures, page.pageNumber, requestedScale);
+          }
           if (sw != null) {
             pdfrxLazyLog('#$_viewerInstanceId RENDER p${page.pageNumber} THREW after ${sw.elapsedMilliseconds}ms: $e');
           }
@@ -2652,7 +3318,7 @@ class _PdfViewerState extends State<PdfViewer>
     Rect targetRect,
     double visibleArea,
   ) {
-    if (!mounted || !widget.params.isVisible) return null;
+    if (!_canRenderCache(cache)) return null;
     final pageRect = _layout!.pageLayouts[page.pageNumber - 1];
     final rect = pageRect.intersect(targetRect);
     scale = _boundedRenderingScale(scale, rect.width, rect.height, sharedArea: visibleArea);
@@ -2667,6 +3333,7 @@ class _PdfViewerState extends State<PdfViewer>
     final status = pixels != null && (pixels.width < 1 || pixels.height < 1)
         ? null
         : (rect: rect, scale: scale, isCurrent: false);
+    if (!_canRetryRender(cache.partialRenderFailures, page.pageNumber, (rect: rect, scale: scale))) return status;
     final pending = cache.pageImagePartialRenderingRequests[page.pageNumber];
     if (pending != null && pending.rect == rect && pending.scale == scale && !pending.cancellationToken.isCanceled) {
       return status;
@@ -2680,12 +3347,13 @@ class _PdfViewerState extends State<PdfViewer>
       Timer(widget.params.behaviorControlParams.partialImageLoadingDelay, () async {
         if (cache.pageImagePartialRenderingRequests[page.pageNumber] != request) return;
         try {
-          if (!mounted || !widget.params.isVisible || cancellationToken.isCanceled) return;
+          if (!_canRenderCache(cache) || cancellationToken.isCanceled) return;
           final newImage = await _createRealSizePartialImage(cache, page, scale, rect, cancellationToken);
           if (newImage != null && cache.pageImagePartialRenderingRequests[page.pageNumber] == request) {
             cache.pageImagesPartial.remove(page.pageNumber)?.dispose();
             cache.pageImagesPartial[page.pageNumber] = newImage;
-            cache.partialRenderFailures.remove(page.pageNumber);
+            cache.partialRenderFailures.remove(page.pageNumber)?.dispose();
+            if (identical(cache, _imageCache)) _completeInitialPageImageWaiterIfReady();
             _invalidate();
           } else {
             newImage?.dispose();
@@ -2713,9 +3381,14 @@ class _PdfViewerState extends State<PdfViewer>
     Rect rect,
     PdfPageRenderCancellationToken cancellationToken,
   ) async {
-    if (!mounted || cancellationToken.isCanceled) return null;
+    if (!_canRenderCache(cache) || cancellationToken.isCanceled) return null;
     // Recorded for PdfViewerController.visibleRenderState when no image can be produced for this request.
-    void recordFailure() => cache.partialRenderFailures[page.pageNumber] = (rect: rect, scale: scale);
+    void recordFailure() {
+      if (mounted && widget.params.isVisible && !cancellationToken.isCanceled) {
+        _recordRenderFailure(cache.partialRenderFailures, page.pageNumber, (rect: rect, scale: scale));
+      }
+    }
+
     final pageRect = _layout!.pageLayouts[page.pageNumber - 1];
     final inPageRect = rect.translate(-pageRect.left, -pageRect.top);
     final scaledRect = scaleRectForRendering(inPageRect, scale);
@@ -2752,13 +3425,13 @@ class _PdfViewerState extends State<PdfViewer>
         cancellationToken: cancellationToken,
         priority: PdfPageRenderPriority.high,
       );
-      if (rendered == null || !mounted || cancellationToken.isCanceled) {
+      if (rendered == null || !_canRenderCache(cache) || cancellationToken.isCanceled) {
         if (rendered == null && !cancellationToken.isCanceled) recordFailure();
         return null;
       }
       final image = _PdfImageWithScaleAndRect(rendered, scale, rect, x, y, pageGeometry: _pageGeometryOf(page));
       rendered = null;
-      if (!mounted || cancellationToken.isCanceled) {
+      if (!_canRenderCache(cache) || cancellationToken.isCanceled) {
         image.dispose();
         return null;
       }
@@ -2771,6 +3444,33 @@ class _PdfViewerState extends State<PdfViewer>
       rendered?.dispose();
       reservation.dispose();
     }
+  }
+
+  /// A changed render target gets a fresh retry budget; ordinary repaints do not.
+  bool _canRetryRender<K>(Map<int, _PdfImageRenderFailure<K>> failures, int pageNumber, K key) {
+    final failure = failures[pageNumber];
+    if (failure == null) return true;
+    if (failure.key == key) return failure.canRetry;
+    failures.remove(pageNumber)?.dispose();
+    return true;
+  }
+
+  void _recordRenderFailure<K>(Map<int, _PdfImageRenderFailure<K>> failures, int pageNumber, K key) {
+    var failure = failures[pageNumber];
+    if (failure == null || failure.key != key) {
+      failure?.dispose();
+      failure = failures[pageNumber] = _PdfImageRenderFailure(key);
+    }
+    failure.record(() {
+      if (mounted && widget.params.isVisible) _invalidate();
+    });
+  }
+
+  void _retryFailedRenderings() {
+    _imageCache.clearAllRenderFailures();
+    _magnifierImageCache.clearAllRenderFailures();
+    _measurementFailures.clear();
+    _invalidate();
   }
 
   bool _ignoresWheelDelta(PointerScrollEvent event) =>
@@ -2826,6 +3526,8 @@ class _PdfViewerState extends State<PdfViewer>
         delta = Offset(dx, dy);
       }
 
+      // Page turning uses the raw wheel delta, not the scroll speed set by scrollByMouseWheel.
+      if (_onPagedWheel(scrollMultiplier == 0 ? delta : delta / scrollMultiplier, trackpad: false)) return;
       _interactionDelegate?.pan(delta, _layoutMetrics);
     } finally {
       _stopInteraction();
@@ -2874,6 +3576,7 @@ class _PdfViewerState extends State<PdfViewer>
   Matrix4 _calcMatrixForRect(Rect rect, {double? zoomMax, double? margin}) {
     margin ??= 0;
     var zoom = min((_viewSize!.width - margin * 2) / rect.width, (_viewSize!.height - margin * 2) / rect.height);
+    if (!zoom.isFinite) zoom = _currentZoom;
     if (zoomMax != null && zoom > zoomMax) zoom = zoomMax;
     return _calcMatrixFor(rect.center, zoom: zoom, viewSize: _viewSize!);
   }
@@ -2922,9 +3625,13 @@ class _PdfViewerState extends State<PdfViewer>
     }
   }
 
+  /// The page margin reported by the current layout ([PdfPageLayout.margin]). Used everywhere a
+  /// "page margin" is needed so the layout, size delegate, navigation, and fit-zoom all agree.
+  double get _pageMargin => _layout?.margin ?? 0.0;
+
   Matrix4 _calcMatrixForPage({required int pageNumber, PdfPageAnchor? anchor}) {
     final effectiveAnchor = anchor ?? widget.params.pageAnchor;
-    final pageRect = _layout!.pageLayouts[pageNumber - 1].inflate(widget.params.margin);
+    final pageRect = _layout!.pageLayouts[pageNumber - 1].inflate(_pageMargin);
     if (effectiveAnchor == PdfPageAnchor.center) {
       return _calcMatrixFor(pageRect.center, zoom: _currentZoom, viewSize: _viewSize!);
     }
@@ -2956,8 +3663,10 @@ class _PdfViewerState extends State<PdfViewer>
     if (dest == null) return null;
     final page = _document!.pages[dest.pageNumber - 1];
     final pageRect = _layout!.pageLayouts[dest.pageNumber - 1];
-    double calcX(double? x) => (x ?? 0) / page.width * pageRect.width;
-    double calcY(double? y) => (page.height - (y ?? 0)) / page.height * pageRect.height;
+    // Coordinates outside the page are clamped to it, as other viewers do: some PDF producers write a large top
+    // such as `/XYZ 0 10000 0` to mean "the top of the page", which would otherwise scroll many pages before it.
+    double calcX(double? x) => (x ?? 0).clamp(0.0, page.width) / page.width * pageRect.width;
+    double calcY(double? y) => (page.height - (y ?? 0).clamp(0.0, page.height)) / page.height * pageRect.height;
     final params = dest.params;
     switch (dest.command) {
       case PdfDestCommand.xyz:
@@ -3034,6 +3743,7 @@ class _PdfViewerState extends State<PdfViewer>
 
     try {
       if (destination == null) return; // do nothing
+      _confinedSpread = null;
       _stopInteractiveViewerAnimation();
       _animationResettingGuard++;
       _animController.reset();
@@ -3077,15 +3787,19 @@ class _PdfViewerState extends State<PdfViewer>
     return _calcMatrixForRect(rect, margin: margin);
   }
 
-  Future<void> _ensureVisible(Rect rect, {Duration duration = const Duration(milliseconds: 200), double margin = 0}) =>
-      _goTo(_calcMatrixToEnsureRectVisible(rect, margin: margin), duration: duration);
+  Future<void> _ensureVisible(Rect rect, {Duration duration = const Duration(milliseconds: 200), double margin = 0}) {
+    final m = _calcMatrixToEnsureRectVisible(rect, margin: margin);
+    // Already visible: keep the current position.
+    if (identical(m, _txController.value)) return _goTo(m, duration: duration);
+    return _goTo(_snapDestination(m), duration: duration);
+  }
 
   Future<void> _goToArea({
     required Rect rect,
     PdfPageAnchor? anchor,
     Duration duration = const Duration(milliseconds: 200),
   }) => _goTo(
-    _calcMatrixForArea(rect: rect, anchor: anchor),
+    _snapDestination(_calcMatrixForArea(rect: rect, anchor: anchor)),
     duration: duration,
     anchor: anchor,
   );
@@ -3107,9 +3821,10 @@ class _PdfViewerState extends State<PdfViewer>
     }
     _gotoTargetPageNumber = pageNumber;
 
+    final pageMatrix = _calcMatrixForPage(pageNumber: targetPageNumber, anchor: anchor);
     await _goTo(
       _calcMatrixForClampedToNearestBoundary(
-        _calcMatrixForPage(pageNumber: targetPageNumber, anchor: anchor),
+        _snapDestination(pageMatrix, pageNumber: targetPageNumber)!,
         viewSize: _viewSize!,
         anchor: anchor,
       ),
@@ -3149,7 +3864,10 @@ class _PdfViewerState extends State<PdfViewer>
   }) async {
     _gotoTargetPageNumber = pageNumber;
     await _goTo(
-      _calcMatrixForRectInsidePage(pageNumber: pageNumber, rect: rect, anchor: anchor),
+      _snapDestination(
+        _calcMatrixForRectInsidePage(pageNumber: pageNumber, rect: rect, anchor: anchor),
+        pageNumber: pageNumber,
+      ),
       duration: duration,
       anchor: anchor,
     );
@@ -3162,7 +3880,7 @@ class _PdfViewerState extends State<PdfViewer>
     if (dest != null) {
       _gotoTargetPageNumber = dest.pageNumber;
     }
-    await _goTo(m, duration: duration);
+    await _goTo(_snapDestination(m, pageNumber: dest?.pageNumber), duration: duration);
     if (dest != null) {
       _setCurrentPageNumber(dest.pageNumber);
     }
@@ -3198,7 +3916,7 @@ class _PdfViewerState extends State<PdfViewer>
   Future<void> _setZoom(Offset position, double zoom, {Duration duration = const Duration(milliseconds: 200)}) {
     _adjustBoundaryMargins(_viewSize!, zoom);
     return _goTo(
-      _calcMatrixFor(position, zoom: zoom, viewSize: _viewSize!),
+      _snapDestination(_calcMatrixFor(position, zoom: zoom, viewSize: _viewSize!)),
       duration: duration,
     );
   }
@@ -3456,6 +4174,8 @@ class _PdfViewerState extends State<PdfViewer>
       _isSelectingAllText = false;
     }
 
+    final snapshot = _selectedTextSnapshot;
+    if (snapshot != null && (snapshot.a != _selA || snapshot.b != _selB)) _selectedTextSnapshot = null;
     if (invalidate) {
       _notifyTextSelectionChange();
     }
@@ -3502,11 +4222,30 @@ class _PdfViewerState extends State<PdfViewer>
   Rect? _anchorBRect;
   Rect? _magnifierRect;
   Rect? _previousMagnifierRect;
+  bool _isMagnifierVisible = false;
   Rect? _contextMenuRect;
   _TextSelectionPart _hoverOn = _TextSelectionPart.none;
 
   bool get enableSelectionHandles =>
       widget.params.textSelectionParams?.enableSelectionHandles ?? _pointerDeviceKind == PointerDeviceKind.touch;
+
+  bool _canRenderCache(_PdfPageImageCache cache) =>
+      mounted && widget.params.isVisible && (identical(cache, _imageCache) || _isMagnifierVisible);
+
+  /// Hiding the overlay ends its work, even while the main viewer remains visible.
+  void _setMagnifierVisible(bool visible) {
+    if (_isMagnifierVisible == visible) return;
+    _isMagnifierVisible = visible;
+    if (visible) return;
+    _magnifierImageCache.cancelAllPendingRenderings();
+    _magnifierImageCache.clearAllRenderFailures();
+    _magnifierImageCache.visiblePageNumbers.clear();
+    _magnifierRect = _previousMagnifierRect = null;
+    // Active requests retain their reservations until their render/decode finally blocks finish.
+    for (final image in [..._magnifierImageCache.pageImages.values, ..._magnifierImageCache.pageImagesPartial.values]) {
+      image.budgetEntry?.touch(isPinned: false, isNeeded: false);
+    }
+  }
 
   List<Widget> _placeTextSelectionWidgets(BuildContext context, Size viewSize, bool isCopyTextEnabled) {
     Widget? createContextMenu(Offset? a, Offset? b, PdfViewerPart contextMenuFor) {
@@ -3540,13 +4279,19 @@ class _PdfViewerState extends State<PdfViewer>
     }
 
     final renderBox = _renderBox;
-    if (!isTextSelectionEnabled || renderBox == null || _textSelA == null || _textSelB == null) {
+    if (!widget.params.isVisible ||
+        !isTextSelectionEnabled ||
+        renderBox == null ||
+        _textSelA == null ||
+        _textSelB == null) {
+      _setMagnifierVisible(false);
       return contextMenuIfNeeded();
     }
 
     final rectA = _documentToRenderBox(_textSelA!.rect, renderBox);
     final rectB = _documentToRenderBox(_textSelB!.rect, renderBox);
     if (rectA == null || rectB == null) {
+      _setMagnifierVisible(false);
       return contextMenuIfNeeded();
     }
 
@@ -3786,6 +4531,8 @@ class _PdfViewerState extends State<PdfViewer>
         _magnifierRect = _previousMagnifierRect = null;
       }
     }
+
+    _setMagnifierVisible(magnifier != null);
 
     final showContextMenuAutomatically =
         widget.params.textSelectionParams?.showContextMenuAutomatically ??
@@ -4229,6 +4976,9 @@ class _PdfViewerState extends State<PdfViewer>
     _selectionHandleTicker?.stop();
     _selectionHandleGlobalPosition = null;
     _selPartMoving = _TextSelectionPart.none;
+    if (widget.params.textSelectionParams?.magnifier?.shouldShowMagnifier?.call() != true) {
+      _setMagnifierVisible(false);
+    }
   }
 
   void _cancelSelectionHandleDrag() {
@@ -4403,6 +5153,7 @@ class _PdfViewerState extends State<PdfViewer>
 
   void _clearTextSelections({bool invalidate = true}) {
     _stopSelectionHandleDrag();
+    _setMagnifierVisible(false);
     _selA = _selB = null;
     _textSelA = _textSelB = null;
     _contextMenuDocumentPosition = null;
@@ -4477,21 +5228,61 @@ class _PdfViewerState extends State<PdfViewer>
     if (a == null || b == null) {
       return [];
     }
+    final selections = <PdfPageTextRange>[];
+    final result = await _visitSelectedTextRanges(a, b, selections.add);
+    return result == _SelectedTextVisitResult.invalid ? [] : selections;
+  }
+
+  /// Reads the captured selection one page at a time, without retaining intermediate geometry.
+  Future<_SelectedTextVisitResult> _visitSelectedTextRanges(
+    PdfTextSelectionPoint a,
+    PdfTextSelectionPoint b,
+    void Function(PdfPageTextRange range) visit,
+  ) async {
+    final document = _document;
+    final generation = _documentGeneration;
+    if (document == null) return _SelectedTextVisitResult.invalid;
     final first = a.text.pageNumber < b.text.pageNumber ? a : b;
     final second = a.text.pageNumber < b.text.pageNumber ? b : a;
-    if (first.text.pageNumber == second.text.pageNumber) {
-      return [a.text.getRangeFromAB(a.index, b.index)];
-    }
-    final selections = <PdfPageTextRange>[first.text.getRangeFromAB(first.index, first.text.charRects.length - 1)];
-
-    for (var i = first.text.pageNumber + 1; i < second.text.pageNumber; i++) {
-      final text = await _loadTextAsync(i, allowHidden: true);
-      if (text == null || text.fullText.isEmpty) continue;
-      selections.add(text.getRangeFromAB(0, text.charRects.length - 1));
+    var contentChanged = false;
+    var isComplete = true;
+    void invalidateCopy(PdfDocumentPageStatusChangedEvent event) {
+      if (second.text.pageNumber > document.pages.length ||
+          event.changes.keys.any((page) => page >= first.text.pageNumber && page <= second.text.pageNumber)) {
+        contentChanged = true;
+      }
     }
 
-    selections.add(second.text.getRangeFromAB(0, second.index));
-    return selections;
+    // Use the existing event subscription: a new subscription can replay older page changes.
+    _textCopyInvalidators.add(invalidateCopy);
+    bool isCurrentDocument() =>
+        mounted &&
+        generation == _documentGeneration &&
+        !contentChanged &&
+        second.text.pageNumber <= document.pages.length;
+    try {
+      if (first.text.pageNumber == second.text.pageNumber) {
+        visit(a.text.getRangeFromAB(a.index, b.index));
+      } else {
+        visit(first.text.getRangeFromAB(first.index, first.text.charRects.length - 1));
+        for (var i = first.text.pageNumber + 1; i < second.text.pageNumber; i++) {
+          if (!isCurrentDocument()) return _SelectedTextVisitResult.invalid;
+          final text = await _loadTextAsync(i, allowHidden: true);
+          if (!isCurrentDocument()) return _SelectedTextVisitResult.invalid;
+          if (text == null) {
+            isComplete = false;
+            continue;
+          }
+          if (text.fullText.isEmpty) continue;
+          visit(text.getRangeFromAB(0, text.charRects.length - 1));
+        }
+        visit(second.text.getRangeFromAB(0, second.index));
+      }
+      if (!isCurrentDocument()) return _SelectedTextVisitResult.invalid;
+      return isComplete ? _SelectedTextVisitResult.complete : _SelectedTextVisitResult.incomplete;
+    } finally {
+      _textCopyInvalidators.remove(invalidateCopy);
+    }
   }
 
   /// The selected ranges from the text cache, or null if the text of a page between the ends is not cached.
@@ -4520,12 +5311,36 @@ class _PdfViewerState extends State<PdfViewer>
   }
 
   @override
-  Future<String> getSelectedText() async => _joinSelectedText(await getSelectedTextRanges());
+  Future<String> getSelectedText() async {
+    _updateTextCachePins();
+    final a = _selA;
+    final b = _selB;
+    if (a == null || b == null) return '';
+    final snapshot = _selectedTextSnapshot;
+    if (snapshot != null && snapshot.a == a && snapshot.b == b) return snapshot.text;
+    final generation = _documentGeneration;
+    final chunks = <String>[];
+    final result = await _visitSelectedTextRanges(a, b, (range) => chunks.add(range.text));
+    if (result == _SelectedTextVisitResult.invalid) return '';
+    final text = chunks.join();
+    // A pending copy still returns its captured selection, but must not replace a newer selection's text.
+    if (result == _SelectedTextVisitResult.complete && generation == _documentGeneration && a == _selA && b == _selB) {
+      _selectedTextSnapshot = (a: a, b: b, text: text);
+    }
+    return text;
+  }
 
   @override
   String? get selectedTextIfLoaded {
+    final snapshot = _selectedTextSnapshot;
+    if (snapshot != null && snapshot.a == _selA && snapshot.b == _selB) return snapshot.text;
     final selections = _selectedTextRangesIfLoaded();
-    return selections == null ? null : _joinSelectedText(selections);
+    if (selections == null) return null;
+    final text = _joinSelectedText(selections);
+    final a = _selA;
+    final b = _selB;
+    if (a != null && b != null) _selectedTextSnapshot = (a: a, b: b, text: text);
+    return text;
   }
 
   static String _joinSelectedText(List<PdfPageTextRange> selections) => selections.map((e) => e.text).join();
@@ -4626,15 +5441,20 @@ class _PdfViewerState extends State<PdfViewer>
   }
 
   Future<bool> _copyTextSelection() async {
-    if (_document!.permissions?.allowsCopying == false) return false;
-    setClipboardData(await getSelectedText());
+    final document = _document;
+    if (document == null || document.permissions?.allowsCopying == false) return false;
+    final text = await getSelectedText();
+    if (!mounted || document != _document || text.isEmpty) return false;
+    setClipboardData(text);
     return true;
   }
 
   @override
   Future<bool> copyTextSelection() async {
+    final a = _selA;
+    final b = _selB;
     final result = await _copyTextSelection();
-    _clearTextSelections();
+    if (result && mounted && a == _selA && b == _selB) _clearTextSelections();
     return result;
   }
 
@@ -4702,22 +5522,35 @@ class _PdfPageImageCache {
   final pagePreviewRenderings = <int, ({PdfPageRenderCancellationToken token, PdfPageRenderPriority priority})>{};
   final pageImagePartialRenderingRequests = <int, _PdfPartialImageRenderingRequest>{};
 
-  /// Scale of the latest preview render that produced no image, by page number; see
+  /// Failed preview requests and their bounded retries, by page number; see
   /// [_PdfViewerState._evaluateVisibleRenderState].
-  final previewRenderFailures = <int, double>{};
+  final previewRenderFailures = <int, _PdfImageRenderFailure<double>>{};
 
-  /// Rectangle and scale of the latest partial render that produced no image, by page number.
-  final partialRenderFailures = <int, ({Rect rect, double scale})>{};
+  /// Failed partial requests and their bounded retries, by page number.
+  final partialRenderFailures = <int, _PdfImageRenderFailure<({Rect rect, double scale})>>{};
 
   void clearRenderFailures(int pageNumber) {
-    previewRenderFailures.remove(pageNumber);
-    partialRenderFailures.remove(pageNumber);
+    previewRenderFailures.remove(pageNumber)?.dispose();
+    partialRenderFailures.remove(pageNumber)?.dispose();
+  }
+
+  void clearAllRenderFailures() {
+    for (final failure in previewRenderFailures.values) {
+      failure.dispose();
+    }
+    for (final failure in partialRenderFailures.values) {
+      failure.dispose();
+    }
+    previewRenderFailures.clear();
+    partialRenderFailures.clear();
   }
 
   Iterable<int> get pendingPageNumbers => {
     ...pageImageRenderingTimers.keys,
     ...cancellationTokens.keys,
     ...pageImagePartialRenderingRequests.keys,
+    ...previewRenderFailures.entries.where((entry) => entry.value.hasPendingRetry).map((entry) => entry.key),
+    ...partialRenderFailures.entries.where((entry) => entry.value.hasPendingRetry).map((entry) => entry.key),
   };
 
   void addCancellationToken(int pageNumber, PdfPageRenderCancellationToken token) {
@@ -4747,6 +5580,10 @@ class _PdfPageImageCache {
       image.dispose();
     }
     pageImagesPartial.clear();
+    for (final failure in partialRenderFailures.values) {
+      failure.dispose();
+    }
+    partialRenderFailures.clear();
   }
 
   void releaseAllImages() {
@@ -4767,36 +5604,45 @@ class _PdfPageImageCache {
       image.dispose();
     }
     pageImagesPartial.clear();
-    previewRenderFailures.clear();
-    partialRenderFailures.clear();
+    clearAllRenderFailures();
   }
 
   /// Disposes every image except those of [keep], cancelling their pending renders; see
   /// [PdfViewerController.releaseCachedImages].
-  void releaseImagesExcept(Set<int> keep) {
+  void releaseImagesExcept(Set<int> keep) => _releaseImagesWhere((pageNumber) => !keep.contains(pageNumber));
+
+  /// Releases removed page slots before cache entries are compared with the new layout.
+  void releaseImagesAfter(int lastPageNumber) => _releaseImagesWhere((pageNumber) => pageNumber > lastPageNumber);
+
+  void _releaseImagesWhere(bool Function(int pageNumber) shouldRelease) {
     final pageNumbers = {
       ...pageImages.keys,
       ...pageImagesPartial.keys,
       ...pageImageRenderingTimers.keys,
       ...cancellationTokens.keys,
       ...pageImagePartialRenderingRequests.keys,
+      ...previewRenderFailures.keys,
+      ...partialRenderFailures.keys,
     };
     for (final pageNumber in pageNumbers) {
-      if (keep.contains(pageNumber)) continue;
+      if (!shouldRelease(pageNumber)) continue;
       cancelPendingRenderings(pageNumber);
       pageImages.remove(pageNumber)?.dispose();
       pageImagesPartial.remove(pageNumber)?.dispose();
+      clearRenderFailures(pageNumber);
     }
-    previewRenderFailures.removeWhere((pageNumber, _) => !keep.contains(pageNumber));
-    partialRenderFailures.removeWhere((pageNumber, _) => !keep.contains(pageNumber));
   }
 
   void cancelPendingPartialRendering(int pageNumber) {
     pageImagePartialRenderingRequests.remove(pageNumber)?.cancel();
   }
 
-  void cancelPendingRenderings(int pageNumber) {
+  void cancelPendingRenderings(int pageNumber, {bool cancelRetryTimers = true}) {
     pageImageRenderingTimers.remove(pageNumber)?.cancel();
+    if (cancelRetryTimers) {
+      previewRenderFailures[pageNumber]?.dispose();
+      partialRenderFailures[pageNumber]?.dispose();
+    }
     cancelPendingPartialRendering(pageNumber);
     final tokens = cancellationTokens.remove(pageNumber);
     if (tokens != null) {
@@ -4816,11 +5662,9 @@ class _PdfPageImageCache {
 
   /// Marks the cached bitmaps for [pageNumber] as needing a re-render.
   ///
-  /// When [page] is given, bitmaps already rendered from that same geometry are
-  /// left alone: re-rendering them would burn a full page render on the worker
-  /// isolate to produce a pixel-identical image. This matters under on-demand
-  /// measurement, where every page raises a status change as its estimated size
-  /// is replaced -- usually by the very same size.
+  /// [page] must only be supplied for a metadata-only update. Bitmaps rendered
+  /// from that same geometry can then be retained after progressive measurement.
+  /// Content reloads and page moves invalidate images regardless of geometry.
   void makeCacheImageForPageDirty(int pageNumber, {PdfPage? page}) {
     final geometry = page == null ? null : _pageGeometryOf(page);
     bool stillValid(_PdfImageWithScale image) => geometry != null && image.pageGeometry == geometry;
@@ -4872,6 +5716,31 @@ class _PdfPageImageCache {
       }
     }
   }
+}
+
+/// Stops a failing request after three attempts, with 250 ms and 1 s between retries.
+///
+/// The timer only requests a repaint. Visibility, cancellation, in-flight work and image reservations are still
+/// checked by the normal rendering path. Waiting for a reservation or canceling a render does not count as a failure.
+class _PdfImageRenderFailure<K> {
+  _PdfImageRenderFailure(this.key);
+
+  final K key;
+  int _attempts = 0;
+  Timer? _retryTimer;
+
+  bool get hasPendingRetry => _retryTimer?.isActive ?? false;
+  bool get canRetry => _attempts < 3 && !hasPendingRetry;
+
+  void record(VoidCallback onRetry) {
+    _retryTimer?.cancel();
+    _attempts++;
+    if (_attempts < 3) {
+      _retryTimer = Timer(Duration(milliseconds: _attempts == 1 ? 250 : 1000), onRetry);
+    }
+  }
+
+  void dispose() => _retryTimer?.cancel();
 }
 
 class _PdfPartialImageRenderingRequest {
@@ -5044,6 +5913,9 @@ class _PdfViewerTransformationController extends TransformationController {
 /// What selection part is moving by mouse-dragging/finger-panning.
 enum _TextSelectionPart { none, free, a, b }
 
+/// Whether a selection read was invalidated, skipped unavailable text, or read every selected page.
+enum _SelectedTextVisitResult { invalid, incomplete, complete }
+
 /// Represents a point (combination of page and character index) in the text selection.
 /// It contains the [PdfPageText] and the index of the character in that text.
 @immutable
@@ -5202,23 +6074,150 @@ class PdfTextSelectionAnchor {
 /// It can be either [a] or [b], which represents the start and end of the selection respectively.
 enum PdfTextSelectionAnchorType { a, b }
 
-/// Defines page layout.
 String _fmtPageSize(PdfPage page) => '${page.width.toStringAsFixed(0)}x${page.height.toStringAsFixed(0)}';
 
+/// The resolved page geometry produced by a [PdfPageLayoutStrategy].
 class PdfPageLayout {
-  PdfPageLayout({required this.pageLayouts, required this.documentSize});
+  PdfPageLayout({
+    required this.pageLayouts,
+    required this.documentSize,
+    this.margin = 0.0,
+    this.fitMode = PdfFitMode.none,
+    this.primaryAxis,
+    List<PdfPageRange>? spreads,
+  }) : _spreads = spreads; // ignore: prefer_initializing_formals
+
+  /// Page rectangles in document coordinates; index `i` is page `i + 1`.
   final List<Rect> pageLayouts;
+
+  /// Overall document size in document coordinates.
   final Size documentSize;
+
+  /// The margin around pages baked into this geometry, in document units.
+  ///
+  /// The viewer uses it for page navigation and fit-zoom, and passes it to the size delegate so
+  /// its fit/min scale matches the geometry.
+  final double margin;
+
+  /// The [PdfFitMode] the geometry was produced with. Size delegates use it to floor the min scale
+  /// (fit-width for `fill`/`cover`, fit-page for `fit`).
+  final PdfFitMode fitMode;
+
+  /// The axis pages are arranged and scrolled along, used for page turning ([PdfViewerParams.paging]).
+  ///
+  /// If null, it is inferred from [documentSize]: horizontal if the document is wider than tall,
+  /// otherwise vertical. Layouts should set it when that guess can be wrong (e.g. a facing-pages
+  /// layout of a short document).
+  final Axis? primaryAxis;
+
+  /// [primaryAxis], or the axis inferred from [documentSize] when it is null.
+  Axis get effectivePrimaryAxis =>
+      primaryAxis ?? (documentSize.width > documentSize.height ? Axis.horizontal : Axis.vertical);
+
+  final List<PdfPageRange>? _spreads;
+
+  /// The spreads (groups of pages shown side by side, such as facing pages), in order.
+  ///
+  /// If the layout did not specify them, consecutive pages whose rects overlap along
+  /// [effectivePrimaryAxis] are grouped.
+  late final List<PdfPageRange> spreads = _spreads ?? _calcSpreads();
+
+  List<PdfPageRange> _calcSpreads() {
+    final vertical = effectivePrimaryAxis == Axis.vertical;
+    final result = <PdfPageRange>[];
+    Rect? last;
+    for (var i = 0; i < pageLayouts.length; i++) {
+      final rect = pageLayouts[i];
+      if (last != null &&
+          (vertical
+              ? rect.top < last.bottom && rect.bottom > last.top
+              : rect.left < last.right && rect.right > last.left)) {
+        result[result.length - 1] = PdfPageRange(result.last.firstPageNumber, i + 1);
+        last = last.expandToInclude(rect);
+        continue;
+      }
+      result.add(PdfPageRange.single(i + 1));
+      last = rect;
+    }
+    return result;
+  }
+
+  /// Bounding rect of each spread in [spreads] (pages only, without [margin]).
+  late final List<Rect> spreadBounds = [
+    for (final spread in spreads)
+      spread.pageNumbers.map((n) => pageLayouts[n - 1]).reduce((a, b) => a.expandToInclude(b)),
+  ];
+
+  /// The slot of each spread in [spreads]: the spread's area along [effectivePrimaryAxis] extended
+  /// halfway into the gaps to its neighbors (and to the document edges), spanning the document on
+  /// the cross axis. With [PdfViewerParams.paging], this is what the view shows at the home zoom.
+  late final List<Rect> spreadSlots = _calcSpreadSlots();
+
+  List<Rect> _calcSpreadSlots() {
+    final vertical = effectivePrimaryAxis == Axis.vertical;
+    final bounds = spreadBounds;
+    final docEnd = vertical ? documentSize.height : documentSize.width;
+    return [
+      for (var i = 0; i < bounds.length; i++)
+        () {
+          final start = i == 0
+              ? 0.0
+              : ((vertical ? bounds[i - 1].bottom : bounds[i - 1].right) +
+                        (vertical ? bounds[i].top : bounds[i].left)) /
+                    2;
+          final end = i == bounds.length - 1
+              ? docEnd
+              : ((vertical ? bounds[i].bottom : bounds[i].right) +
+                        (vertical ? bounds[i + 1].top : bounds[i + 1].left)) /
+                    2;
+          return vertical
+              ? Rect.fromLTRB(0, start, documentSize.width, end)
+              : Rect.fromLTRB(start, 0, end, documentSize.height);
+        }(),
+    ];
+  }
+
+  /// Index into [spreads] of the spread that contains [pageNumber], or -1 if it is out of range.
+  int spreadIndexOf(int pageNumber) {
+    if (pageNumber < 1 || pageNumber > pageLayouts.length) return -1;
+    final list = spreads;
+    var lo = 0;
+    var hi = list.length - 1;
+    while (lo <= hi) {
+      final mid = (lo + hi) >> 1;
+      final range = list[mid];
+      if (pageNumber < range.firstPageNumber) {
+        hi = mid - 1;
+      } else if (pageNumber > range.lastPageNumber) {
+        lo = mid + 1;
+      } else {
+        return mid;
+      }
+    }
+    return -1;
+  }
 
   @override
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
     if (other is! PdfPageLayout) return false;
-    return listEquals(pageLayouts, other.pageLayouts) && documentSize == other.documentSize;
+    return listEquals(pageLayouts, other.pageLayouts) &&
+        documentSize == other.documentSize &&
+        margin == other.margin &&
+        fitMode == other.fitMode &&
+        primaryAxis == other.primaryAxis &&
+        listEquals(_spreads, other._spreads);
   }
 
   @override
-  int get hashCode => pageLayouts.hashCode ^ documentSize.hashCode;
+  int get hashCode => Object.hash(
+    Object.hashAll(pageLayouts),
+    documentSize,
+    margin,
+    fitMode,
+    primaryAxis,
+    _spreads == null ? null : Object.hashAll(_spreads),
+  );
 }
 
 /// Represents the result of the hit test on the page.
@@ -5265,8 +6264,9 @@ enum PdfVisibleRenderState {
   /// No visible page is pending, but the latest attempt to render at least one of them failed.
   ///
   /// This happens when rendering a visible page for the current view returns no image or throws, or when the size of
-  /// a page cannot be loaded. The state is not final: the viewer retries when it repaints the page, and the state
-  /// becomes [ready] if a retry succeeds.
+  /// a page cannot be loaded. Failed image requests are retried twice, after 250 ms and 1 s, and then stop until
+  /// their render target or page changes, the page leaves the cache extent, or
+  /// [PdfViewerController.retryFailedRenderings] is called. A successful retry changes the state to [ready].
   failed,
 
   /// Every page intersecting the viewport has been painted with its final image for the current view.
@@ -5350,9 +6350,10 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   /// Any change that alters what should be painted, such as scrolling, zooming, resizing, going to another page,
   /// replacing the document, or releasing the visible pages' images (`releaseCachedImages(keepVisible: false)`),
   /// makes the state leave [PdfVisibleRenderState.ready]. Images that finish rendering for a view that is no longer
-  /// current never make the state ready. A failure is remembered for the page and requested image, so returning to a
-  /// view whose rendering failed reports [PdfVisibleRenderState.failed] again until a retry succeeds. The state always
-  /// describes the current view, so an intermediate frame of an animated scroll or zoom can be ready; wait for
+  /// current never make the state ready. An image failure is remembered for the page and requested image while the
+  /// page stays in the cache extent. Returning to that view reports [PdfVisibleRenderState.failed] until a retry
+  /// succeeds; returning after the page has left the cache extent starts a fresh request. The state always describes
+  /// the current view, so an intermediate frame of an animated scroll or zoom can be ready; wait for
   /// navigation methods such as [goToPage] to complete before waiting for the state.
   ///
   /// The state covers only the page images. It does not cover [PdfViewerParams.pageOverlaysBuilder],
@@ -5414,10 +6415,12 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   /// The view port size (The widget's client area's size)
   Size get viewSize => _state._viewSize!;
 
-  /// The zoom ratio that fits the page's smaller side (either horizontal or vertical) to the view port.
+  /// The home zoom: the zoom ratio that fits the page's smaller side (either horizontal or vertical)
+  /// to the view port or, for [PdfFitMode.fill] and [PdfFitMode.fit] layouts, the one that fits the
+  /// document across the scroll axis (about 1.0).
   double get coverScale => _state._layoutMetrics.coverScale;
 
-  /// The zoom ratio that fits whole the page to the view port.
+  /// The zoom ratio that fits whole the page to the view port; for facing pages, the whole spread.
   double? get alternativeFitScale => _state._layoutMetrics.alternativeFitScale;
 
   /// The minimum zoom ratio allowed.
@@ -5449,6 +6452,32 @@ class PdfViewerController extends ValueListenable<Matrix4> {
 
   /// The current page number if available.
   int? get pageNumber => _state._pageNumber;
+
+  /// The pages of the spread that contains [pageNumber] (see [PdfPageLayout.spreads]), e.g. `2-3`
+  /// for facing pages; a single page for sequential layouts. Null if not available.
+  PdfPageRange? get currentPageRange {
+    final layout = _state._layout;
+    final pageNumber = _state._pageNumber;
+    if (layout == null || pageNumber == null) return null;
+    final index = layout.spreadIndexOf(pageNumber);
+    return index < 0 ? PdfPageRange.single(pageNumber) : layout.spreads[index];
+  }
+
+  /// The range of pages that intersect the view (first to last), or null if no page is visible.
+  PdfPageRange? get visiblePageRange {
+    final layout = _state._layout;
+    if (layout == null || _state._viewSize == null) return null;
+    final view = _state._visibleRect;
+    int? first;
+    int? last;
+    for (var i = 0; i < layout.pageLayouts.length; i++) {
+      if (layout.pageLayouts[i].overlaps(view)) {
+        first ??= i + 1;
+        last = i + 1;
+      }
+    }
+    return first == null ? null : PdfPageRange(first, last!);
+  }
 
   /// The document reference associated to the [PdfViewer].
   PdfDocumentRef get documentRef => _state.widget.documentRef;
@@ -5583,8 +6612,9 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   ///
   Matrix4? calcMatrixFitWidthForPage({required int pageNumber}) {
     final page = layout.pageLayouts[pageNumber - 1];
-    final zoom = (viewSize.width - params.margin * 2) / page.width;
-    final y = (viewSize.height / 2 - params.margin) / zoom;
+    final margin = layout.margin;
+    final zoom = (viewSize.width - margin * 2) / page.width;
+    final y = (viewSize.height / 2 - margin) / zoom;
     return calcMatrixFor(page.topCenter.translate(0, y), zoom: zoom, viewSize: viewSize);
   }
 
@@ -5592,7 +6622,8 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   ///
   Matrix4? calcMatrixFitHeightForPage({required int pageNumber}) {
     final page = layout.pageLayouts[pageNumber - 1];
-    final zoom = (viewSize.height - params.margin * 2) / page.height;
+    final margin = layout.margin;
+    final zoom = (viewSize.height - margin * 2) / page.height;
     return calcMatrixFor(page.center, zoom: zoom, viewSize: viewSize);
   }
 
@@ -5613,7 +6644,7 @@ class PdfViewerController extends ValueListenable<Matrix4> {
       final page = layout.pageLayouts[i];
       if (page.intersect(viewRect).isEmpty) continue;
       final boundaryMargin = _state._adjustedBoundaryMargins;
-      final zoom = viewSize.width / (page.width + (params.margin * 2) + boundaryMargin.horizontal);
+      final zoom = viewSize.width / (page.width + (layout.margin * 2) + boundaryMargin.horizontal);
 
       // NOTE: keep the y-position but center the x-position
       final newMatrix = calcMatrixFor(Offset(page.left + page.width / 2, pos.dy), zoom: zoom);
@@ -5707,8 +6738,17 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   ///
   /// Visible pages and the current selection are kept by default. Set [keepVisible] false under memory pressure,
   /// or [keepSelection] false to also clear the current selection. Visible resources reload on the next paint.
+  /// A kept selection retains its endpoints and previously copied text; other geometry reloads when needed.
   void releaseCachedResources({bool keepVisible = true, bool keepSelection = true}) =>
       _state._releaseCachedResources(keepVisible: keepVisible, keepSelection: keepSelection);
+
+  /// Retries failed page images and measurements, preserving images that rendered successfully.
+  ///
+  /// Each image request gets at most three attempts: the initial render and two retries after 250 ms and 1 s.
+  /// Ordinary repaints, including [invalidate], do not reset that limit. A changed render target, page content,
+  /// leaving the cache extent, or this explicit retry starts a fresh set of attempts. Canceled renders and
+  /// unavailable image budget do not consume attempts. Only pages needed by the current view are requested again.
+  void retryFailedRenderings() => _state._retryFailedRenderings();
 
   /// The current zoom ratio.
   double get currentZoom => value.zoom;
@@ -5859,6 +6899,16 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   /// This is useful when you want to manually update the matrix without
   /// fighting against the active inertia animation.
   void stopInteractiveViewerAnimation() => _state._stopInteractiveViewerAnimation();
+
+  /// Call when a widget other than the viewer itself starts scrolling the view on behalf of the
+  /// user, e.g. a custom scroll bar that sets [value] while dragged; call [endUserScroll] when it
+  /// ends. The viewer then treats the moves like a user gesture: in paged mode
+  /// ([PdfViewerParams.paging]), the view snaps to a page after it, and
+  /// [PdfViewerParams.onAnimationEnd] is called once it is over. `PdfViewerScrollThumb` does this.
+  void beginUserScroll() => _state._beginUserScroll();
+
+  /// Ends a scroll started with [beginUserScroll].
+  void endUserScroll() => _state._endUserScroll();
 
   /// Calculate the matrix that clamps the given [matrix] to the nearest boundary.
   ///
@@ -6298,10 +7348,14 @@ Widget _defaultErrorBannerBuilder(
 class _CanvasLinkPainter {
   _CanvasLinkPainter(this._state);
   final _PdfViewerState _state;
+  late final _loader = PageLinkLoader(
+    onLoaded: () {
+      if (_state.mounted && _state.widget.params.isVisible && isEnabled) _state._invalidate();
+    },
+  );
   MouseCursor _cursor = MouseCursor.defer;
   PdfLink? _hoveredLink;
-  final _links = <int, List<PdfLink>>{};
-  int _generation = 0;
+  PdfPage? _hoveredPage;
 
   bool get isEnabled => _state.widget.params.linkHandlerParams != null;
 
@@ -6315,10 +7369,10 @@ class _CanvasLinkPainter {
 
   /// Reset all the internal data.
   void resetAll() {
-    _generation++;
     _cursor = MouseCursor.defer;
     _hoveredLink = null;
-    _links.clear();
+    _hoveredPage = null;
+    _loader.clear();
   }
 
   void resetCursor([VoidCallback? onCursorChanged]) {
@@ -6327,42 +7381,44 @@ class _CanvasLinkPainter {
   }
 
   /// Repaints only when a hover color is set; otherwise the hovered link looks like any other.
-  void _setHoveredLink(PdfLink? link) {
+  void _setHoveredLink(PdfLink? link, [PdfPage? page]) {
     if (identical(link, _hoveredLink)) return;
     _hoveredLink = link;
+    _hoveredPage = page;
     if (_state.widget.params.linkHandlerParams?.linkHoverColor != null) {
       _state._invalidate();
     }
   }
 
-  /// Release the page data.
+  /// Keep only links in the current page extent, including prefetched pages.
+  void retainPages(Iterable<PdfPage> pages) {
+    _loader.retainPages(isEnabled ? pages : const <PdfPage>[]);
+    if (_hoveredPage case final page? when !_loader.containsPage(page)) {
+      _hoveredPage = null;
+      _hoveredLink = null;
+      _cursor = MouseCursor.defer;
+    }
+  }
+
+  /// Release the page data and invalidate a pending result for the old page.
   void releaseLinksForPage(int pageNumber) {
-    _links.remove(pageNumber);
+    _loader.invalidate(pageNumber);
+    if (_hoveredPage?.pageNumber == pageNumber) {
+      _hoveredPage = null;
+      _hoveredLink = null;
+      _cursor = MouseCursor.defer;
+    }
   }
 
-  List<PdfLink>? _ensureLinksLoaded(PdfPage page, {void Function()? onLoaded}) {
-    if (!page.isLoaded || !_state.widget.params.isVisible) return null;
-    final links = _links[page.pageNumber];
-    if (links != null) return links;
-    final generation = _generation;
-    synchronized(() async {
-      if (!_state.mounted || !_state.widget.params.isVisible || generation != _generation) return null;
-      final links = _links[page.pageNumber];
-      if (links != null) return links;
-      final enableAutoLinkDetection = _state.widget.params.linkHandlerParams?.enableAutoLinkDetection ?? true;
-      final loaded = await page.loadLinks(compact: true, enableAutoLinkDetection: enableAutoLinkDetection);
-      if (!_state.mounted || !_state.widget.params.isVisible || generation != _generation) return null;
-      _links[page.pageNumber] = loaded;
-      if (onLoaded != null) {
-        onLoaded();
-      } else {
-        _state._invalidate();
-      }
-    });
-    return null;
+  List<PdfLink>? _ensureLinksLoaded(PdfPage page) {
+    if (!isEnabled || !_state.mounted || !_state.widget.params.isVisible) return null;
+    return _loader.getOrLoad(
+      page,
+      enableAutoLinkDetection: _state.widget.params.linkHandlerParams?.enableAutoLinkDetection ?? true,
+    );
   }
 
-  PdfLink? _findLinkAtPosition(Offset position) {
+  ({PdfPage page, PdfLink link})? _findLinkAtPosition(Offset position) {
     final hitResult = _state._getPdfPageHitTestResult(position, useDocumentLayoutCoordinates: false);
     if (hitResult == null) return null;
     final links = _ensureLinksLoaded(hitResult.page);
@@ -6370,7 +7426,7 @@ class _CanvasLinkPainter {
     for (final link in links) {
       for (final rect in link.rects) {
         if (rect.containsPoint(hitResult.offset)) {
-          return link;
+          return (page: hitResult.page, link: link);
         }
       }
     }
@@ -6380,7 +7436,7 @@ class _CanvasLinkPainter {
   bool _handleLinkTap(Offset tapPosition) {
     _state._requestFocus();
     resetCursor();
-    final link = _findLinkAtPosition(tapPosition);
+    final link = _findLinkAtPosition(tapPosition)?.link;
     if (link != null) {
       final onLinkTap = _state.widget.params.linkHandlerParams?.onLinkTap;
       if (onLinkTap != null) {
@@ -6396,9 +7452,9 @@ class _CanvasLinkPainter {
       resetCursor(onCursorChanged);
       return;
     }
-    final link = _findLinkAtPosition(position);
-    _setHoveredLink(link);
-    _setCursor(link == null ? MouseCursor.defer : SystemMouseCursors.click, onCursorChanged);
+    final hit = _findLinkAtPosition(position);
+    _setHoveredLink(hit?.link, hit?.page);
+    _setCursor(hit == null ? MouseCursor.defer : SystemMouseCursors.click, onCursorChanged);
   }
 
   void _setCursor(MouseCursor cursor, [VoidCallback? onCursorChanged]) {

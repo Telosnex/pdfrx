@@ -142,6 +142,9 @@ abstract class PdfDocument {
   /// may be heavy because of FFI overhead and it may be better to cache the PDF on memory if it's not too large.
   /// The default size is 1MB.
   ///
+  /// On native PDFium platforms, [read] must fill all requested `size` bytes and return that exact count.
+  /// A short, zero, or negative return for a nonempty request is an error; partial reads are not retried.
+  ///
   /// [passwordProvider] is used to provide password for encrypted PDF. See [PdfPasswordProvider] for more info.
   ///
   /// [firstAttemptByEmptyPassword] is used to determine whether the first attempt to open the PDF is by empty
@@ -196,7 +199,10 @@ abstract class PdfDocument {
   ///
   /// [withCredentials] is used to specify whether to include credentials in the request (Only supported on Web).
   ///
-  /// [timeout] is used to specify the timeout duration for each HTTP request (Only supported on non-Web platforms).
+  /// [timeout] limits each complete HTTP request, including the response body (non-Web platforms only).
+  /// It also limits waiting for headers or the next body chunk. When omitted, the idle limit is five seconds
+  /// and the total limit is five minutes. Expiration aborts the request; partially downloaded blocks are not cached.
+  /// Increase this value for slow connections or large full downloads from servers without range support.
   static Future<PdfDocument> openUri(
     Uri uri, {
     PdfPasswordProvider? passwordProvider,
@@ -226,6 +232,7 @@ abstract class PdfDocument {
   /// is cancelled.
   /// When [onPageLoadProgress] is called, it should return true to continue loading process or false to stop loading.
   /// [data] is an optional data that can be used to pass additional information to the callback.
+  /// Concurrent calls keep independent callbacks and cancellation; stopping one does not stop other consumers.
   ///
   /// [startPageNumber] is the 1-based page number to start measuring from. Pages are measured in order of their
   /// distance from [startPageNumber], alternating after and before it (start, start+1, start-1, start+2, start-2, ...),
@@ -305,6 +312,10 @@ abstract class PdfDocument {
   /// Reload specified pages.
   ///
   /// [pageNumbersToReload] is the list of page numbers (1-based) to reload. If null, all pages are reloaded.
+  /// An empty list leaves existing pages unchanged when the native page count is unchanged.
+  /// The native PDFium backend reloads all current pages if their count changed, because insertions and removals
+  /// may shift the remaining page indices. Invalid page numbers are rejected before publishing any changes.
+  /// Complete native edits before calling this method, and avoid editing the native document while it reloads.
   Future<void> reloadPages({List<int>? pageNumbersToReload});
 
   /// Associate a [PdfFontManager] to the document to handle font loading/substitution for missing fonts.
@@ -334,6 +345,47 @@ abstract class PdfDocument {
       final result = await fontManager.loadMissingFonts(event.missingFonts, onProgress: onProgress);
       await onLoadComplete(result);
     });
+  }
+}
+
+/// Optional backend support for measuring unloaded pages without refreshing their content.
+///
+/// Consumers should call [PdfDocumentMetadataLoading.loadPageMetadata], which also
+/// supports documents that do not implement this interface.
+abstract interface class PdfPageMetadataLoader {
+  /// Loads metadata for the unloaded pages in [pageNumbers] (1-based).
+  ///
+  /// Already loaded pages are left unchanged. Metadata-only notifications must
+  /// never describe a content refresh or a page moved to a different slot.
+  Future<void> loadPageMetadata({required List<int> pageNumbers});
+}
+
+/// Metadata loading that remains compatible with custom [PdfDocument] implementations.
+extension PdfDocumentMetadataLoading on PdfDocument {
+  /// Measures the unloaded pages in [pageNumbers] (1-based).
+  ///
+  /// Use this for on-demand page dimensions. It does not refresh edited content;
+  /// use [PdfDocument.reloadPages] after editing the native document instead.
+  /// Native PDFium and WASM distinguish these measurements from content changes,
+  /// allowing viewers to retain images whose geometry is unchanged.
+  ///
+  /// Other backends fall back to [PdfDocument.reloadPages] for the unloaded pages
+  /// and conservatively invalidate images through their existing page events.
+  Future<void> loadPageMetadata({required List<int> pageNumbers}) async {
+    final document = this;
+    if (document is PdfPageMetadataLoader) {
+      await (document as PdfPageMetadataLoader).loadPageMetadata(pageNumbers: pageNumbers);
+      return;
+    }
+    final snapshot = pages;
+    final unloaded = <int>{};
+    for (final pageNumber in pageNumbers) {
+      if (pageNumber < 1 || pageNumber > snapshot.length) {
+        throw ArgumentError.value(pageNumber, 'pageNumbers', 'Page number is outside the document');
+      }
+      if (!snapshot[pageNumber - 1].isLoaded) unloaded.add(pageNumber);
+    }
+    if (unloaded.isNotEmpty) await reloadPages(pageNumbersToReload: unloaded.toList());
   }
 }
 

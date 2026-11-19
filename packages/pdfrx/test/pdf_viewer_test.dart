@@ -142,7 +142,7 @@ void main() {
           controller: controller,
           params: PdfViewerParams(
             scrollPhysics: const BouncingScrollPhysics(),
-            margin: 10,
+            layoutStrategy: const SequentialPagesLayout(margin: 10, spacing: 10),
             sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(
               calculateInitialZoom: (document, controller, fitZoom, coverZoom) {
                 requestedZoom = fitZoom;
@@ -159,6 +159,44 @@ void main() {
     expect(requestedZoom, isNotNull);
     expect(requestedZoom!, lessThan(controller.coverScale));
     expect(controller.currentZoom, moreOrLessEquals(requestedZoom!));
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(milliseconds: 100));
+  });
+
+  testWidgets('destination coordinates outside the page are clamped to the page', (tester) async {
+    final document = _TestDocument(30);
+    addTearDown(document.dispose);
+    final controller = PdfViewerController();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Align(
+          child: SizedBox(
+            width: 400,
+            height: 400,
+            child: PdfViewer(PdfDocumentRefDirect(document, autoDispose: false), controller: controller),
+          ),
+        ),
+      ),
+    );
+    await _pumpPaintWork(tester);
+    expect(controller.isReady, isTrue);
+
+    const pageNumber = 20;
+    final page = document.pages[pageNumber - 1];
+    List<double> matrix(PdfDestCommand command, List<double?> params) =>
+        controller.calcMatrixForDest(PdfDest(pageNumber, command, params))!.storage.toList();
+
+    expect(matrix(PdfDestCommand.fitR, [-100, -100, -50, -50]).every((v) => v.isFinite), isTrue);
+    // `/XYZ 0 10000 0` is a common way of saying "the top of the page": it must not land pages before it
+    expect(matrix(PdfDestCommand.xyz, [0, 10000, 0]), matrix(PdfDestCommand.xyz, [0, page.height, 0]));
+    expect(matrix(PdfDestCommand.xyz, [-50, 10000, 0]), matrix(PdfDestCommand.xyz, [0, page.height, 0]));
+    expect(matrix(PdfDestCommand.fitH, [10000]), matrix(PdfDestCommand.fitH, [page.height]));
+    expect(matrix(PdfDestCommand.xyz, [0, -500, 0]), matrix(PdfDestCommand.xyz, [0, 0, 0]));
+    expect(
+      matrix(PdfDestCommand.fitR, [-10, -10, page.width + 10, page.height + 10]),
+      matrix(PdfDestCommand.fitR, [0, 0, page.width, page.height]),
+    );
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(milliseconds: 100));
   });
@@ -314,9 +352,11 @@ void main() {
           PdfDocumentRefDirect(document, autoDispose: false),
           controller: controller,
           params: PdfViewerParams(
-            layoutPages: (pages, params) => PdfPageLayout(
-              pageLayouts: [for (final page in pages) Rect.fromLTWH(20.0 - page.pageNumber, 0, 600, 800)],
-              documentSize: const Size(620, 800),
+            layoutStrategy: _FunctionLayout(
+              (pages) => PdfPageLayout(
+                pageLayouts: [for (final page in pages) Rect.fromLTWH(20.0 - page.pageNumber, 0, 600, 800)],
+                documentSize: const Size(620, 800),
+              ),
             ),
             pagePaintCallbacks: [(canvas, rect, page) => painted.add(page.pageNumber)],
           ),
@@ -418,50 +458,36 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
   });
 
-  testWidgets('matrix updates recalculate custom layouts and observe mutable rectangles', (tester) async {
+  testWidgets('layout strategies are reused across matrix updates and rerun on invalidate', (tester) async {
     final document = _TestDocument(1);
     addTearDown(document.dispose);
     final controller = PdfViewerController();
-    final custom = PdfPageLayout(
-      pageLayouts: [const Rect.fromLTWH(0, 0, 600, 800)],
-      documentSize: const Size(800, 800),
-    );
     var layoutCalls = 0;
+    final strategy = _FunctionLayout((_) {
+      layoutCalls++;
+      return PdfPageLayout(pageLayouts: [const Rect.fromLTWH(0, 0, 600, 800)], documentSize: const Size(800, 800));
+    });
     await tester.pumpWidget(
       MaterialApp(
         home: PdfViewer(
           PdfDocumentRefDirect(document, autoDispose: false),
           controller: controller,
-          params: PdfViewerParams(
-            layoutPages: (_, _) {
-              layoutCalls++;
-              return custom;
-            },
-          ),
+          params: PdfViewerParams(layoutStrategy: strategy),
         ),
       ),
     );
     await _pumpPaintWork(tester);
+    expect(layoutCalls, greaterThan(0));
     final callsBeforeScroll = layoutCalls;
     for (var i = 0; i < 10; i++) {
       controller.value = controller.value.clone()..translateByDouble(0, -1, 0, 1);
       await tester.pump(const Duration(milliseconds: 10));
     }
-    expect(layoutCalls, greaterThan(callsBeforeScroll));
-    custom.pageLayouts[0] = const Rect.fromLTWH(100, 0, 600, 800);
-    controller.value = controller.value.clone()..translateByDouble(0, -1, 0, 1);
-    await tester.pump();
-    expect(controller.getPdfPageHitTestResult(const Offset(50, 100), useDocumentLayoutCoordinates: true), isNull);
-    final callsAfterScroll = layoutCalls;
+    expect(layoutCalls, callsBeforeScroll, reason: 'pan does not relayout');
     controller.invalidate();
     await tester.pump();
     await tester.pump();
-    expect(layoutCalls, callsAfterScroll + 1);
-    expect(controller.getPdfPageHitTestResult(const Offset(50, 100), useDocumentLayoutCoordinates: true), isNull);
-    expect(
-      controller.getPdfPageHitTestResult(const Offset(150, 100), useDocumentLayoutCoordinates: true)?.page.pageNumber,
-      1,
-    );
+    expect(layoutCalls, callsBeforeScroll + 1);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(milliseconds: 100));
   });
@@ -843,11 +869,13 @@ void main() {
             verticalCacheExtent: 2,
             horizontalCacheExtent: 0,
             getPageRenderingScale: (_, _, _, _) => 2,
-            layoutPages: (pages, params) => PdfPageLayout(
-              pageLayouts: [
-                for (var i = 0; i < pages.length; i++) Rect.fromLTWH(i.isEven ? 606 : 0, (i ~/ 2) * 816, 600, 800),
-              ],
-              documentSize: Size(1206, (pages.length / 2).ceil() * 816),
+            layoutStrategy: _FunctionLayout(
+              (pages) => PdfPageLayout(
+                pageLayouts: [
+                  for (var i = 0; i < pages.length; i++) Rect.fromLTWH(i.isEven ? 606 : 0, (i ~/ 2) * 816, 600, 800),
+                ],
+                documentSize: Size(1206, (pages.length / 2).ceil() * 816),
+              ),
             ),
             behaviorControlParams: const PdfViewerBehaviorControlParams(
               pageImageCachingDelay: Duration.zero,
@@ -1314,6 +1342,42 @@ void main() {
         reason: 'moving from $from to $to, page $ahead is next; order ${document.renderOrder}',
       );
       expect(order, contains(behind));
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(budget.estimatedBytes, 0);
+  });
+
+  testWidgets('a jump renders the target page before neighbors that show only a sliver', (tester) async {
+    tester.view.physicalSize = const Size(1400, 900) * 2;
+    tester.view.devicePixelRatio = 2;
+    addTearDown(tester.view.reset);
+    final budget = PdfImageCacheBudget(maximumBytes: 96 * 1024 * 1024);
+    addTearDown(budget.dispose);
+    final document = _scannedDocument(24);
+    addTearDown(document.dispose);
+    final controller = PdfViewerController();
+    await tester.pumpWidget(MaterialApp(home: _scannedBookViewer(document, controller, budget)));
+    await _pumpFrames(tester);
+    // Fit the whole page: around the shortest pages, the pages above and below show a sliver.
+    final page = controller.layout.pageLayouts[2];
+    final zoom = math.min(
+      controller.viewSize.width / (page.width + 16),
+      controller.viewSize.height / (page.height + 16),
+    );
+    await controller.goTo(controller.calcMatrixFor(page.center, zoom: zoom), duration: Duration.zero);
+    await _pumpFrames(tester);
+    for (final target in [12, 20]) {
+      document.renderOrder.clear();
+      await controller.goToPage(pageNumber: target, anchor: PdfPageAnchor.top, duration: Duration.zero);
+      final layouts = controller.layout.pageLayouts;
+      expect(
+        layouts[target].overlaps(controller.visibleRect) || layouts[target - 2].overlaps(controller.visibleRect),
+        isTrue,
+        reason: 'a neighbor of page $target is partly visible',
+      );
+      await _pumpFrames(tester);
+      expect(document.renderOrder.first, target, reason: 'jumping to $target; order ${document.renderOrder}');
     }
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(milliseconds: 100));
@@ -2746,8 +2810,7 @@ void main() {
           PdfDocumentRefDirect(document!),
           controller: controller,
           params: const PdfViewerParams(
-            minScale: 0.1,
-            useAlternativeFitScaleAsMinScale: false,
+            sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(useAlternativeFitScaleAsMinScale: false),
             behaviorControlParams: PdfViewerBehaviorControlParams(trailingPageLoadingDelay: Duration.zero),
           ),
         ),
@@ -2770,7 +2833,7 @@ void main() {
     final pageTopInViewport =
         (controller.layout.pageLayouts.first.top - controller.visibleRect.top) * controller.currentZoom;
 
-    expect(pageTopInViewport, moreOrLessEquals(controller.params.margin * controller.currentZoom, epsilon: 0.1));
+    expect(pageTopInViewport, moreOrLessEquals(controller.layout.margin * controller.currentZoom, epsilon: 0.1));
 
     await tester.pumpWidget(const SizedBox.shrink());
     await _finishNativeDisposal(tester, document);
@@ -2796,16 +2859,7 @@ void main() {
           PdfDocumentRefDirect(document!),
           controller: controller,
           params: PdfViewerParams(
-            layoutPages: (pages, params) {
-              const pageSize = Size(1000, 500);
-              final pageLayouts = [
-                for (final _ in pages) Rect.fromLTWH(params.margin, params.margin, pageSize.width, pageSize.height),
-              ];
-              return PdfPageLayout(
-                pageLayouts: pageLayouts,
-                documentSize: Size(pageSize.width + params.margin * 2, pageSize.height + params.margin * 2),
-              );
-            },
+            layoutStrategy: const _LandscapeLayout(),
             behaviorControlParams: const PdfViewerBehaviorControlParams(trailingPageLoadingDelay: Duration.zero),
           ),
         ),
@@ -2849,16 +2903,7 @@ void main() {
           controller: controller,
           params: PdfViewerParams(
             underflowAnchor: PdfPageAnchor.top,
-            layoutPages: (pages, params) {
-              const pageSize = Size(1000, 500);
-              final pageLayouts = [
-                for (final _ in pages) Rect.fromLTWH(params.margin, params.margin, pageSize.width, pageSize.height),
-              ];
-              return PdfPageLayout(
-                pageLayouts: pageLayouts,
-                documentSize: Size(pageSize.width + params.margin * 2, pageSize.height + params.margin * 2),
-              );
-            },
+            layoutStrategy: const _LandscapeLayout(),
             behaviorControlParams: const PdfViewerBehaviorControlParams(trailingPageLoadingDelay: Duration.zero),
           ),
         ),
@@ -2875,7 +2920,7 @@ void main() {
     final pageTopInViewport =
         (controller.layout.pageLayouts.first.top - controller.visibleRect.top) * controller.currentZoom;
 
-    expect(pageTopInViewport, moreOrLessEquals(controller.params.margin * controller.currentZoom, epsilon: 0.1));
+    expect(pageTopInViewport, moreOrLessEquals(controller.layout.margin * controller.currentZoom, epsilon: 0.1));
 
     await tester.pumpWidget(const SizedBox.shrink());
     await _finishNativeDisposal(tester, document);
@@ -2931,6 +2976,67 @@ void main() {
     expect(controller.currentZoom, zoomBefore);
 
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _finishNativeDisposal(tester, document);
+    await tester.pump(const Duration(milliseconds: 100));
+  });
+
+  testWidgets('PointerScaleEvent with scrollPhysics respects boundaryMargin on zoom in and out', (tester) async {
+    await binding.setSurfaceSize(const Size(500, 1000));
+    addTearDown(() => binding.setSurfaceSize(null));
+    final controller = PdfViewerController();
+    final document = await tester.runAsync(
+      () async => PdfDocument.openData(
+        await testPdfFile.readAsBytes(),
+        sourceName: 'pointer-scale-scroll-physics-test.pdf',
+        useProgressiveLoading: false,
+      ),
+    );
+    addTearDown(() => document?.dispose());
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PdfViewer(
+          PdfDocumentRefDirect(document!),
+          controller: controller,
+          params: const PdfViewerParams(
+            scrollPhysics: ClampingScrollPhysics(),
+            boundaryMargin: EdgeInsets.zero,
+            behaviorControlParams: PdfViewerBehaviorControlParams(trailingPageLoadingDelay: Duration.zero),
+          ),
+        ),
+      ),
+    );
+
+    for (var i = 0; i < 20 && (!controller.isReady || controller.alternativeFitScale == null); i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+    }
+    expect(controller.isReady, isTrue);
+    await tester.pump();
+
+    // Zoom in using PointerScaleEvent (e.g. Flutter Web Ctrl+Wheel)
+    binding.handlePointerEvent(const PointerScaleEvent(position: Offset(250, 500), scale: 2.0));
+    await tester.pump();
+
+    final docSize = controller.layout.documentSize;
+    final visibleIn = controller.visibleRect;
+    // With boundaryMargin EdgeInsets.zero, visibleRect must not exceed document bounds when zoomed in
+    expect(visibleIn.left, greaterThanOrEqualTo(-0.01));
+    expect(visibleIn.top, greaterThanOrEqualTo(-0.01));
+    expect(visibleIn.right, lessThanOrEqualTo(docSize.width + 0.01));
+    expect(visibleIn.bottom, lessThanOrEqualTo(docSize.height + 0.01));
+
+    // Zoom out using PointerScaleEvent
+    binding.handlePointerEvent(const PointerScaleEvent(position: Offset(250, 500), scale: 0.5));
+    await tester.pump();
+
+    // When underflowing, content must remain centered in the viewport
+    final visibleOut = controller.visibleRect;
+    final pageRect = controller.layout.pageLayouts.first;
+    final pageCenterX = (pageRect.center.dx - visibleOut.left) * controller.currentZoom;
+    expect(pageCenterX, moreOrLessEquals(250.0, epsilon: 0.5));
+
     await tester.pumpWidget(const SizedBox.shrink());
     await _finishNativeDisposal(tester, document);
     await tester.pump(const Duration(milliseconds: 100));
@@ -3720,4 +3826,42 @@ void _registerForwardedPanZoomTests() {
       });
     }
   }
+}
+
+/// Test-only strategy wrapping a function. Identity equality, so only use it with a single
+/// strategy instance per test.
+class _FunctionLayout extends PdfPageLayoutStrategy {
+  _FunctionLayout(this.layout);
+  final PdfPageLayout Function(List<PdfPage> pages) layout;
+
+  @override
+  PdfPageLayout resolve(PdfPageLayoutContext context) => layout(context.pages);
+
+  @override
+  bool operator ==(Object other) => identical(this, other);
+
+  @override
+  int get hashCode => identityHashCode(this);
+}
+
+/// Every page laid out as a 1000x500 landscape rect with an 8.0 margin.
+class _LandscapeLayout extends PdfPageLayoutStrategy {
+  const _LandscapeLayout();
+  static const _margin = 8.0;
+
+  @override
+  PdfPageLayout resolve(PdfPageLayoutContext context) {
+    const pageSize = Size(1000, 500);
+    return PdfPageLayout(
+      pageLayouts: [for (final _ in context.pages) const Rect.fromLTWH(_margin, _margin, 1000, 500)],
+      documentSize: Size(pageSize.width + _margin * 2, pageSize.height + _margin * 2),
+      margin: _margin,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) => other is _LandscapeLayout;
+
+  @override
+  int get hashCode => (_LandscapeLayout).hashCode;
 }

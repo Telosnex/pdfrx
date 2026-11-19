@@ -8,6 +8,8 @@ import 'dart:ui_web' as ui_web;
 import 'package:crypto/crypto.dart';
 import 'package:pdfrx_engine/pdfrx_engine.dart';
 // ignore: implementation_imports
+import 'package:pdfrx_engine/src/font_environment.dart';
+// ignore: implementation_imports
 import 'package:pdfrx_engine/src/pdf_page_proxies.dart';
 import 'package:rxdart/rxdart.dart';
 import 'package:synchronized/extension.dart';
@@ -446,16 +448,16 @@ class PdfrxEntryFunctionsWasmImpl extends PdfrxEntryFunctions {
   }
 
   @override
-  Future<void> clearAllFontData() async {
+  Future<void> clearAllFontData() => changeFontEnvironment(() async {
     await init();
     await _sendCommand('clearAllFontData', parameters: {'dummy': true});
-  }
+  });
 
   @override
   PdfrxBackendType get backendType => PdfrxBackendType.pdfiumWasm;
 }
 
-class _PdfDocumentWasm extends PdfDocument {
+class _PdfDocumentWasm extends PdfDocument implements PdfPageMetadataLoader {
   _PdfDocumentWasm._(
     this.document, {
     required super.sourceName,
@@ -537,12 +539,12 @@ class _PdfDocumentWasm extends PdfDocument {
           _notifyDocumentLoadComplete();
           return;
         }
-        final newPages = pages.toList(growable: false);
+        final pageSnapshot = pages;
         // firstPageIndex/loadedPageIndices are kept for workers that predate pageIndices.
         final firstPageIndex = pageIndicesToLoad.reduce(min);
         final loadedPageIndices = <int>[
-          for (var i = firstPageIndex + 1; i < newPages.length; i++)
-            if (newPages[i].isLoaded) i,
+          for (var i = firstPageIndex + 1; i < pageSnapshot.length; i++)
+            if (pageSnapshot[i].isLoaded) i,
         ];
         final result = await _sendCommand(
           'loadPagesProgressively',
@@ -556,10 +558,17 @@ class _PdfDocumentWasm extends PdfDocument {
         );
         if (isDisposed) return;
         final pagesLoaded = parsePages(this, result['pages'] as List<dynamic>);
+        final newPages = pages.toList(growable: false);
         for (final page in pagesLoaded) {
-          newPages[page.pageNumber - 1] = page; // Update the existing page
+          final index = page.pageNumber - 1;
+          // A concurrent edit must not become a metadata-only replacement.
+          if (index < newPages.length &&
+              index < pageSnapshot.length &&
+              identical(newPages[index], pageSnapshot[index])) {
+            newPages[index] = page;
+          }
         }
-        pages = newPages;
+        _setPages(newPages, isContentChanged: false);
         updateMissingFonts(result['missingFonts']);
         if (pagesLoaded.isEmpty) return;
 
@@ -599,11 +608,30 @@ class _PdfDocumentWasm extends PdfDocument {
   }
 
   @override
-  Future<void> reloadPages({List<int>? pageNumbersToReload}) async {
+  Future<void> reloadPages({List<int>? pageNumbersToReload}) => _reloadPages(pageNumbersToReload);
+
+  @override
+  Future<void> loadPageMetadata({required List<int> pageNumbers}) => _reloadPages(pageNumbers, metadataOnly: true);
+
+  Future<void> _reloadPages(List<int>? pageNumbers, {bool metadataOnly = false}) async {
     if (isDisposed) return;
+    final requested = pageNumbers?.toList(growable: false);
     await synchronized(() async {
       if (isDisposed) return;
-      final pageIndices = pageNumbersToReload?.map((n) => n - 1).toList();
+      final pageSnapshot = pages;
+      if (metadataOnly) {
+        for (final pageNumber in requested!) {
+          if (pageNumber < 1 || pageNumber > pageSnapshot.length) {
+            throw ArgumentError.value(pageNumber, 'pageNumbers', 'Page number is outside the document');
+          }
+        }
+      }
+      final pageIndices = requested
+          ?.where((n) => !metadataOnly || !pageSnapshot[n - 1].isLoaded)
+          .map((n) => n - 1)
+          .toSet()
+          .toList();
+      if (metadataOnly && pageIndices!.isEmpty) return;
       final result = await _sendCommand(
         'reloadPages',
         parameters: {
@@ -617,13 +645,19 @@ class _PdfDocumentWasm extends PdfDocument {
       final newPages = pages.toList();
       for (final page in reloadedPages) {
         final pageIndex = page.pageNumber - 1;
+        if (metadataOnly &&
+            (pageIndex >= newPages.length ||
+                pageIndex >= pageSnapshot.length ||
+                !identical(newPages[pageIndex], pageSnapshot[pageIndex]))) {
+          continue;
+        }
         if (pageIndex < newPages.length) {
           newPages[pageIndex] = page;
         } else {
           newPages.add(page);
         }
       }
-      pages = newPages;
+      _setPages(newPages, isContentChanged: !metadataOnly);
 
       updateMissingFonts(result['missingFonts']);
     });
@@ -638,7 +672,18 @@ class _PdfDocumentWasm extends PdfDocument {
   List<PdfPage> get pages => _pages;
 
   @override
-  set pages(Iterable<PdfPage> newPages) {
+  set pages(Iterable<PdfPage> newPages) => _setPages(newPages);
+
+  static bool _samePageSource(PdfPage previous, PdfPage next) {
+    final oldSource = previous.unwrap<_PdfPageWasm>();
+    final newSource = next.unwrap<_PdfPageWasm>();
+    return oldSource != null &&
+        newSource != null &&
+        identical(oldSource.document, newSource.document) &&
+        oldSource.pageNumber == newSource.pageNumber;
+  }
+
+  void _setPages(Iterable<PdfPage> newPages, {bool isContentChanged = true}) {
     final previousPageCount = _pages.length;
     final pages = <PdfPage>[];
     final changes = <int, PdfPageStatusChange>{};
@@ -666,7 +711,11 @@ class _PdfDocumentWasm extends PdfDocument {
       if (oldPageIndex != -1) {
         changes[newPageNumber] = PdfPageStatusChange.moved(page: updated, oldPageNumber: oldPageIndex + 1);
       } else {
-        changes[newPageNumber] = PdfPageStatusChange.modified(page: updated);
+        changes[newPageNumber] = PdfPageStatusChange.modified(
+          page: updated,
+          isContentChanged:
+              isContentChanged || newPageNumber > _pages.length || !_samePageSource(_pages[newPageNumber - 1], updated),
+        );
       }
     }
 
