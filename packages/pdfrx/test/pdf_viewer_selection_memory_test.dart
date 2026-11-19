@@ -557,6 +557,9 @@ class _Page implements PdfPage {
   bool get isLoaded => !document.unloadedPages.contains(pageNumber);
 
   @override
+  Future<String?> loadTextOnly() async => (await loadText())?.fullText;
+
+  @override
   Future<PdfPageRawText?> loadText() async {
     document.loads++;
     document.onTextLoad?.call();
