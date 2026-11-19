@@ -24,10 +24,12 @@ void registerFontMapperNativeTests() {
       await entries.stopBackgroundWorker();
       directory = Directory.systemTemp.createTempSync('pdfrx-native-font-');
       file = File('${directory.path}/font.ttf')..writeAsBytesSync(buildFontFixture());
+      // The font cache reads through the canonical path, which may differ from the temp path.
+      final canonicalPath = file.resolveSymbolicLinksSync();
       await BackgroundWorker.compute((path) {
         native.pdfium = _FontMappingPdfium(native.pdfium);
         IOOverrides.global = _FontIoOverrides(path);
-      }, directory.path);
+      }, canonicalPath);
       await entries.configureFontEnvironment();
     });
 
@@ -207,8 +209,8 @@ class _FontMappingPdfium extends bindings.PDFium {
 }
 
 final class _FontIoOverrides extends IOOverrides {
-  _FontIoOverrides(this.directory);
-  final String directory;
+  _FontIoOverrides(this.canonicalPath);
+  final String canonicalPath;
   int headers = 0;
   int payloads = 0;
   int bytes = 0;
@@ -216,7 +218,7 @@ final class _FontIoOverrides extends IOOverrides {
   @override
   File createFile(String path) {
     final actual = super.createFile(path);
-    return path.startsWith(directory) ? _CountingFontFile(actual, this) : actual;
+    return path == canonicalPath ? _CountingFontFile(actual, this) : actual;
   }
 }
 
