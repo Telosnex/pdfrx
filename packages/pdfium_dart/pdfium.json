@@ -1,72 +1,67 @@
 {
   "_comment": "PDFium for every platform, from bblanchon/pdfium-binaries. Update with tool/update_pdfium.dart: see doc/updating-pdfium.md.",
-  "release": "chromium/8165",
-  "version": "160.0.8165.0",
+  "release": "chromium/8179",
+  "version": "160.0.8179.0",
   "archives": {
     "android-arm": {
-      "sha256": "3698a4fcf0349d78be2bc04b90d828f25b3ea2154d1ada2ed6c528edc2797a10"
+      "sha256": "e4270c933ba496681cde6274389b598d97383403acb75ec10fe8b8de1aa51007"
     },
     "android-arm64": {
-      "sha256": "ce4f17fea8881cdf163950748ab90854cf33f296309fab68de9441a1d41ff6cc"
+      "sha256": "e74f8d3deb968dcf7e09a15152f19393df932ffc4e519149e61e8e0ee15c9753"
     },
     "android-x64": {
-      "sha256": "e5d8646165eff2f837e5d8fc356eda6b7e624cbfad5915e2500428e244a89b44"
+      "sha256": "fd7f3afdae094549e77b44a95e88ff00cb59e84ba5eb5fc79470ccf10c85ccf9"
     },
     "android-x86": {
-      "sha256": "83d4074c9492de28f0739529f22afdfef9a89973b1b65d10ab37d068f91bc7fd"
+      "sha256": "f5d2f7d245f1eec6579df9b86f1d9b3836fe9fa74e39ec904b4aa1681b60cc91"
     },
     "linux-arm": {
-      "sha256": "021ab8f7721360a19120893edacef5478edbf8684dad5172b85f422bb6d58296"
+      "sha256": "e60d2aecd9a3f389f497fd3474c6775e83d308ae79efeeafcb29a4c119dd9e0e"
     },
     "linux-arm64": {
-      "sha256": "338f5dcc907a20331812ae8ab01b16ff18966f4a247d790c8ad8fb49029d768b"
+      "sha256": "18bb6d568257b28d14f6c3b8bfb48caf73d4615b319ca4d43b424c2a03431d9f"
     },
     "linux-x64": {
-      "sha256": "ba7865e16c0271daab75256790be06c26272190afe6e2a70eae0bb39bb99089c"
+      "sha256": "b4766a6bf2856efbcc6c3cc7d6ae9022bdc6bb36ddc1acdd92d1f1873f773f4b"
     },
     "linux-x86": {
-      "sha256": "78c5f2baba626570ee6727a76a3c886d00d0a81946d8913edc082ef9d0e30b1f"
+      "sha256": "e6a9851eb2f91b39b46bc2754902575fb43cdd39da70c1561b4a8ed5d98fe1eb"
     },
     "mac-arm64": {
-      "sha256": "112e74d717f3e0310273b70f3c8780e8a61ff11b34834124465c8305c841d350"
+      "sha256": "44b7c6f55dd33454d0909728bd0adf6c86a8e141b36f07a6b6f50e228e1dfb46"
     },
     "mac-x64": {
-      "sha256": "07285915b564e46a432a9909dbc1f15892885ca6489e3faeefc70dee77ed371a"
+      "sha256": "b29bbfe37efcad5b443fa3556c0485ec96fc1992d5b19d84df49d48fbed1d0d2"
     },
     "win-arm64": {
-      "sha256": "d65e405c59cffe6fe36c0935b90d40ddf3ce75ef284f3168a28dcf00d0388131"
+      "sha256": "9c659bf0cd9bdefcbf7ec0e4b1675c2961e0fdfd4ce097b411efd9742832fe06"
     },
     "win-x64": {
-      "sha256": "ca7338ae7779b8b1b82f4580305c4d762d214f8df1d54b47647fe3cc75989ded"
+      "sha256": "836a77c9053f624839c66010cddea7b675628a36b8831d2330178bb169d241b6"
     },
     "win-x86": {
-      "sha256": "fc697d735516b2dd408072ecdd808a67e12c6402f3e762299015da1d81142986"
+      "sha256": "bffb1e3a9410dd4a718085d5353e4063b77ccb15f005129f3d0fdfeb1cb2e312"
     },
     "ios-catalyst-arm64": {
-      "sha256": "e97f07786375edca589ba0d33ebaad18ad8ab32922747a30a6c6fdd2cd5694c5"
+      "sha256": "d3e9005104654b14541e76e46cf4755e8a6f586675d3169920350540cfbaecc7"
     },
     "ios-catalyst-x64": {
-      "sha256": "0745add6e0ab9aafacf71f08066d69480cdd4c3a3335cbfc5ebc9b591bf0917a"
+      "sha256": "67d380f45d5ee8d765d391676597fb1ffac025c025963e53b7dac105610d5a19"
     },
     "ios-device-arm64": {
-      "sha256": "77329e61107846d7f3e68d458a28a65a92cf95fc449c86c9006f215e343800c8"
+      "sha256": "eb1687fd3398dd1632682915c41c1d0783dfc1d2ac513da63493c2e0d046402e"
     },
     "ios-simulator-arm64": {
-      "sha256": "8bda624984d9e9b2e6a3aa83307b25807151aab1a2e801f11b35bef868986168"
+      "sha256": "e2fe1160057ea1cf3af75562babdd270f67e5e2bc68e5fbe5edc1f8fbc3b2473"
     },
     "ios-simulator-x64": {
-      "sha256": "d82be3b3233d73445a560851a6db01d4763a847dba580d0c7f7204a1ce5ffeb5"
+      "sha256": "4af23ca931ef1b742ca43b4aafb6a809d3b9aebf3304c54a5ef8215c5d4bbfb7"
     },
     "wasm": {
-      "sha256": "febcdebc11b2a015d3b7e3614085ca7bfd381deb76445a6949cf00966c9edf25"
+      "sha256": "35a5ff5d72e874813b50febbd23f0697cf277b55aa7624a0410d88313b2a8dee"
     }
   },
   "wasm": {
-    "sha256": "c19a58d96a865015cb4a175c6bc1ee9744d64d3b7aa1b4d916779f6ca7d921b3"
-  },
-  "xcframework": {
-    "release": "chromium/8165",
-    "url": "https://github.com/Telosnex/pdfrx/releases/download/pdfium-xcframework-chromium-8165/PDFium-chromium-8165-20261118-165113.xcframework.zip",
-    "sha256": "6bf02db00ba01835df5071f782e0cbe1af25a5c19630bb789a1db1c385e920f1"
+    "sha256": "851d808b1520a3fca980fa3c19754f8efc1e9df903a1c4c529fd41e63a7450e8"
   }
 }
