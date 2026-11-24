@@ -1,8 +1,8 @@
 # PDFium.xcframework, built by packages/pdfium_flutter/tool/build_xcframework.sh.
 # Keep in step with packages/pdfium_dart/pdfium.json and Package.swift
 # (packages/pdfium_dart/test/pdfium_pins_test.dart checks).
-PDFIUM_URL = "https://github.com/Telosnex/pdfrx/releases/download/pdfium-xcframework-chromium-8165/PDFium-chromium-8165-20261118-165113.xcframework.zip"
-PDFIUM_HASH = "6bf02db00ba01835df5071f782e0cbe1af25a5c19630bb789a1db1c385e920f1"
+PDFIUM_URL = "https://github.com/Telosnex/pdfrx/releases/download/pdfium-xcframework-chromium-8179/PDFium-chromium-8179-20261124-165322.xcframework.zip"
+PDFIUM_HASH = "414d344bafbafa25893019f518fba69e5b507b201759d1bf511c70babd2b5d5c"
 
 require 'yaml'
 

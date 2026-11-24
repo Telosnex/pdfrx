@@ -63,5 +63,10 @@
   },
   "wasm": {
     "sha256": "851d808b1520a3fca980fa3c19754f8efc1e9df903a1c4c529fd41e63a7450e8"
+  },
+  "xcframework": {
+    "release": "chromium/8179",
+    "url": "https://github.com/Telosnex/pdfrx/releases/download/pdfium-xcframework-chromium-8179/PDFium-chromium-8179-20261124-165322.xcframework.zip",
+    "sha256": "414d344bafbafa25893019f518fba69e5b507b201759d1bf511c70babd2b5d5c"
   }
 }
